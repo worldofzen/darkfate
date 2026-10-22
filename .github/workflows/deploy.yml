@@ -1,0 +1,43 @@
+# Publishes the game to GitHub Pages every time changes are pushed to the main branch.
+# GitHub builds it (npm run build) and puts the result online at
+# https://<your-user-name>.github.io/<repo-name>/
+name: Publish game
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # also lets you re-publish by hand from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

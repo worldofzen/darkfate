@@ -1,0 +1,490 @@
+// The player: movement, combat and the third-person camera.
+//
+//   WASD          walk (relative to where the camera looks)    Shift   run
+//   Left click    attack (click again during a swing to chain up to 3 hits)
+//   Right click   hold to block with the shield (you can walk while blocking)
+//   Space         dodge: leap toward the direction you're pressing, or backstep if none
+//   Q / middle click   lock on to the boss (again to let go; with nothing to lock onto,
+//                      the camera swings behind you). While locked you face the boss and strafe.
+//   R             drink a Flask of Crimson Tears (heals; you can only shuffle slowly while drinking)
+//
+// Attacks, dodges, running and blocked hits cost stamina (see stamina.js for the numbers).
+import * as THREE from 'three';
+import { pushOut, cameraBlockers } from './level/colliders.js';
+import { STAMINA } from './stamina.js';
+
+const WALK_SPEED = 1.8; // meters per second (the walk animation's own pace is ~1.4)
+const RUN_SPEED = 4.5; // (the run animation's own pace is ~4)
+const BLOCK_SPEED = 1.4; // slower while holding the shield up
+const TURN_SPEED = 12; // how quickly the knight turns to face where it's going
+const BODY_RADIUS = 0.4; // how "wide" the knight is when bumping into walls
+export const PLAYER_BODY = { radius: 0.45, height: 1.85 }; // for sword hit detection
+const MAX_HEALTH = 300;
+
+// Attacks: each click plays the next swing in this list.
+const ATTACK_CHAIN = ['attack_4', 'slash', 'slash_3'];
+const ATTACK_DAMAGE = [45, 50, 65]; // damage of each hit in the chain (the finisher hits hardest)
+const ATTACK_TIME_SCALE = 1.3; // play the swings a little faster than the pack does
+const COMBO_OPENS = 0.35; // a click after 35% of the swing is remembered for the next one
+const RECOVERY = 0.75; // after 75% of the swing you can chain, dodge or walk away
+
+// Dodges.
+const LEAP = { clip: 'jump', timeScale: 1.35 }; // crouched leap behind the shield
+const BACKSTEP = { clip: 'run_back', timeScale: 1.3 }; // quick hop backwards
+const INVULNERABLE_PART = 0.7; // can't be hurt during the first 70% of a dodge
+
+// Getting hit (or having your guard broken) makes you stagger.
+const STAGGER = { clip: 'impact', timeScale: 1.2 };
+const BLOCK_ANGLE = 0.3; // the shield only covers hits from in front (about ±70°)
+
+// Flasks of Crimson Tears. Like Elden Ring, a charge is used up the moment you start
+// drinking: get hit before the sip and it's wasted. They refill when you respawn at the grace.
+export const FLASKS = {
+  charges: 4,
+  heal: 150, // half your health
+  // The Mixamo "Drinking" animation, mirrored to the left hand (the sword is in the right).
+  // We only use its middle part — raise, drink, lower — skipping the idle start and end.
+  clip: 'drinking_left',
+  clipFrom: 0.36,
+  clipTo: 0.66,
+  sipAt: 0.45, // the heal happens when the head tips back, 45% of the way through
+  emptySpeedUp: 1.6, // raising an empty flask is quicker, but still leaves you open
+  timeWithoutClip: 1.4, // seconds, if the animation is missing
+  moveSpeed: 0.8, // m/s: a slow shuffle while drinking
+};
+
+const CAMERA_HEIGHT = 1.5; // the camera looks at this point above the knight's feet
+const MOUSE_SENSITIVITY = 0.0025;
+const MIN_PITCH = -0.35; // looking up from below
+const MAX_PITCH = 1.2; // looking down from above
+const MIN_DISTANCE = 2;
+const MAX_DISTANCE = 9;
+const LOCK_PITCH = 0.3; // camera tilt while locked on
+const LOCK_FOLLOW = 8; // how quickly the camera swings round to keep the target in view
+const LOCK_LOOK_SHARE = 0.35; // camera aims 35% of the way from you toward the target
+
+// `animator` plays the knight's animations (see animator.js).
+// `stamina` pays for actions (see stamina.js).
+// `lockOn` picks and tracks the locked-on enemy (see lockOn.js).
+// `flask` is the bottle shown in the left hand while drinking (see flask.js).
+export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, flask) {
+  const keys = new Set();
+  let yaw = knight.rotation.y + Math.PI; // camera starts behind the knight
+  let pitch = 0.25;
+  let distance = 4.5;
+
+  // While the title screen is up, the player can't control anything (see setActive).
+  let active = true;
+
+  // Button presses wait here until the next frame handles them.
+  let attackPressed = false;
+  let dodgePressed = false;
+  let drinkPressed = false;
+  let lockPressed = false;
+  let blockHeld = false;
+  let recenterYaw = null; // when set, the camera swings round to this angle
+  let shake = 0; // camera shake strength, fading out
+
+  // What the knight is doing: 'free' (walking around), 'attack', 'dodge', 'drink', 'stagger' or 'dead'.
+  let mode = 'free';
+  let health = MAX_HEALTH;
+  let flasks = FLASKS.charges;
+  let onEmptyFlask = () => {};
+  animator.trim('drink', FLASKS.clip, FLASKS.clipFrom, FLASKS.clipTo);
+  let swingCount = 0; // each swing gets a number, so one swing can only hit once
+  let modeTime = 0; // seconds since the current move started
+  let current = null; // timing details of the current move
+  let winded = false; // ran out of stamina while running: no running until some comes back
+  let comboIndex = 0;
+  let comboQueued = false;
+  let faceAngle = knight.rotation.y; // where the knight wants to face
+
+  // --- Keyboard ---
+  window.addEventListener('keydown', (e) => {
+    if (!active) return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (!e.repeat) dodgePressed = true;
+    }
+    if (e.code === 'KeyQ' && !e.repeat) lockPressed = true;
+    if (e.code === 'KeyR' && !e.repeat) drinkPressed = true;
+    keys.add(e.code);
+  });
+  window.addEventListener('keyup', (e) => keys.delete(e.code));
+  window.addEventListener('blur', () => {
+    keys.clear(); // don't keep walking or blocking if the window loses focus
+    blockHeld = false;
+  });
+
+  // --- Mouse (Dark Souls style) ---
+  // The game captures the mouse, so just moving it turns the camera; no button needed.
+  // Esc lets the mouse go (a "Click to continue" note appears); a click captures it again.
+  // A few embedded browsers can't capture the mouse: there, moving the mouse over the game
+  // still turns the camera, it just stops when the pointer reaches the edge of the window.
+  const locked = () => document.pointerLockElement === canvas;
+  let canCapture = typeof canvas.requestPointerLock === 'function';
+  function capture() {
+    if (!canCapture || locked()) return;
+    const fail = () => (canCapture = false);
+    try {
+      // "Unadjusted" = raw mouse movement without the operating system's acceleration, like a game.
+      const request = canvas.requestPointerLock({ unadjustedMovement: true });
+      if (request?.catch) request.catch(() => Promise.resolve(canvas.requestPointerLock()).catch(fail));
+    } catch {
+      Promise.resolve(canvas.requestPointerLock()).catch(fail);
+    }
+  }
+  document.addEventListener('pointerlockerror', () => (canCapture = false));
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right click = block, not a menu
+  canvas.addEventListener('mousedown', (e) => {
+    if (!active) return;
+    if (e.button === 0) {
+      if (canCapture && !locked()) capture(); // this click just takes the mouse back
+      else attackPressed = true;
+    }
+    if (e.button === 2) blockHeld = true;
+    if (e.button === 1) {
+      e.preventDefault(); // no auto-scroll
+      lockPressed = true;
+    }
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 2) blockHeld = false;
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!active) return;
+    if (canCapture && !locked()) return; // mouse let go (Esc): leave the camera alone
+    if (lockOn.target) return; // the lock steers the camera
+    yaw -= e.movementX * MOUSE_SENSITIVITY;
+    pitch = THREE.MathUtils.clamp(pitch + e.movementY * MOUSE_SENSITIVITY, MIN_PITCH, MAX_PITCH);
+  });
+  canvas.addEventListener('wheel', (e) => {
+    if (!active) return;
+    distance = THREE.MathUtils.clamp(distance + e.deltaY * 0.005, MIN_DISTANCE, MAX_DISTANCE);
+  }, { passive: true });
+
+  const input = new THREE.Vector3();
+  const lookAt = new THREE.Vector3();
+  const wanted = new THREE.Vector3();
+  const ray = new THREE.Raycaster();
+
+  // Which way to face to look straight at `target`.
+  function angleTo(target) {
+    return Math.atan2(target.x - knight.position.x, target.z - knight.position.z);
+  }
+
+  // --- Moves ---
+  // Each start* function returns false if the move couldn't happen (e.g. no stamina left).
+  function startAttack(index) {
+    if (!animator.has(ATTACK_CHAIN[index]) || !stamina.spend(STAMINA.attack)) return false;
+    const swing = animator.perform(ATTACK_CHAIN[index], { timeScale: ATTACK_TIME_SCALE });
+    mode = 'attack';
+    modeTime = 0;
+    current = swing;
+    swingCount++;
+    comboIndex = index;
+    comboQueued = false;
+    // Swing at the locked-on enemy; otherwise toward where you're pushing, or straight ahead.
+    const target = lockOn.target;
+    if (target) faceAngle = angleTo(target);
+    else faceAngle = input.lengthSq() > 0 ? Math.atan2(input.x, input.z) : knight.rotation.y;
+    return true;
+  }
+
+  function startDodge() {
+    const leaping = input.lengthSq() > 0;
+    const style = leaping ? LEAP : BACKSTEP;
+    if (!animator.has(style.clip) || !stamina.spend(leaping ? STAMINA.dodge : STAMINA.backstep)) return false;
+    const dodge = animator.perform(style.clip, { timeScale: style.timeScale });
+    mode = 'dodge';
+    modeTime = 0;
+    if (leaping) {
+      faceAngle = Math.atan2(input.x, input.z);
+      knight.rotation.y = faceAngle; // dodges snap to the new direction
+    }
+    const facing = new THREE.Vector3(Math.sin(knight.rotation.y), 0, Math.cos(knight.rotation.y));
+    current = { ...dodge, direction: leaping ? facing : facing.negate() };
+    return true;
+  }
+
+  // Always starts (an empty flask still gets raised), so it never returns false.
+  function startDrink() {
+    const full = flasks > 0;
+    if (full) flasks--;
+    else onEmptyFlask();
+    mode = 'drink';
+    modeTime = 0;
+    // The arms drink while the legs keep doing whatever they were doing.
+    const drink = animator.performUpper('drink', { timeScale: full ? 1 : FLASKS.emptySpeedUp });
+    current = { duration: drink?.duration ?? FLASKS.timeWithoutClip, full, healed: false };
+    return true;
+  }
+
+  function startStagger() {
+    const stagger = animator.perform(STAGGER.clip, { timeScale: STAGGER.timeScale });
+    if (!stagger) return;
+    mode = 'stagger';
+    modeTime = 0;
+    current = stagger;
+  }
+
+  function die() {
+    mode = 'dead';
+    lockOn.release();
+    animator.setUpperPose(null);
+    animator.perform('death');
+  }
+
+  // An enemy hits you for `damage`, from `from` (a world position).
+  // Returns what happened: 'dodged', 'blocked', 'guard broken', 'hit' or 'killed'.
+  function takeHit(damage, from) {
+    if (mode === 'dead') return 'killed';
+    if (mode === 'dodge' && modeTime < current.duration * INVULNERABLE_PART) return 'dodged';
+    const toAttacker = new THREE.Vector3().subVectors(from, knight.position).setY(0).normalize();
+    const facing = new THREE.Vector3(Math.sin(knight.rotation.y), 0, Math.cos(knight.rotation.y));
+    if (mode === 'free' && blockHeld && facing.dot(toAttacker) > BLOCK_ANGLE) {
+      const cost = damage * STAMINA.blockPerDamage;
+      const enough = stamina.value >= cost;
+      stamina.spend(cost);
+      if (enough) return 'blocked';
+      startStagger(); // not enough stamina to hold the shield up: guard broken
+      return 'guard broken';
+    }
+    health = Math.max(0, health - damage);
+    if (health <= 0) {
+      die();
+      return 'killed';
+    }
+    startStagger();
+    return 'hit';
+  }
+
+  // Back to full health, standing at `position` facing `angle` (used when you respawn).
+  function reset(position, angle) {
+    health = MAX_HEALTH;
+    flasks = FLASKS.charges;
+    knight.position.copy(position);
+    knight.rotation.y = faceAngle = angle;
+    yaw = angle + Math.PI;
+    mode = 'free';
+    winded = false;
+    animator.release();
+    animator.locomote('idle');
+  }
+
+  function backToFree() {
+    mode = 'free';
+    animator.release();
+  }
+
+  function turnTowards(angle, dt) {
+    knight.rotation.y = approachAngle(knight.rotation.y, angle, TURN_SPEED * dt);
+  }
+
+  // Move angle `from` part of the way toward `to`, turning the short way around.
+  function approachAngle(from, to, amount) {
+    const diff = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+    return from + diff * Math.min(1, amount);
+  }
+
+  // While locked on: walk forward or back, or sidestep, depending on which way
+  // you're pushing compared to the way the knight faces.
+  function strafeClip(direction, angle) {
+    const ahead = direction.x * Math.sin(angle) + direction.z * Math.cos(angle);
+    const toRight = -direction.x * Math.cos(angle) + direction.z * Math.sin(angle);
+    if (Math.abs(ahead) >= Math.abs(toRight)) return ahead >= 0 ? 'walk' : 'walk_back';
+    return toRight > 0 ? 'strafe_right' : 'strafe_left';
+  }
+
+  function update(dt) {
+    // 1. Which way do the keys point? (W = away from the camera, D = camera's right)
+    const forward = (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0);
+    const right = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+    input.set(
+      -Math.sin(yaw) * forward + Math.cos(yaw) * right,
+      0,
+      -Math.cos(yaw) * forward - Math.sin(yaw) * right
+    );
+    if (input.lengthSq() > 0) input.normalize();
+
+    // Lock on or let go. With nothing to lock onto, the camera swings behind you instead.
+    if (lockPressed && mode !== 'dead') {
+      const wasLocked = !!lockOn.target;
+      const cameraDirection = camera.getWorldDirection(new THREE.Vector3());
+      if (!lockOn.toggle(cameraDirection) && !wasLocked) recenterYaw = knight.rotation.y + Math.PI;
+    }
+    lockPressed = false;
+    lockOn.update();
+    const target = lockOn.target;
+
+    // 2. Do whatever the current mode allows.
+    if (mode === 'attack') {
+      modeTime += dt;
+      const progress = modeTime / current.duration;
+      if (progress < 0.25) turnTowards(faceAngle, dt); // small aim adjustment at the start
+      if (attackPressed && progress > COMBO_OPENS) comboQueued = true;
+      if (progress >= RECOVERY) {
+        const chained = comboQueued && comboIndex < ATTACK_CHAIN.length - 1 && startAttack(comboIndex + 1);
+        if (!chained) {
+          comboQueued = false;
+          if (!(dodgePressed && startDodge()) && (input.lengthSq() > 0 || progress >= 1)) backToFree();
+        }
+      }
+    } else if (mode === 'dodge') {
+      modeTime += dt;
+      const progress = modeTime / current.duration;
+      const ease = progress < 0.75 ? 1 : Math.max(0, (1 - progress) / 0.25); // slow down at the end
+      knight.position.addScaledVector(current.direction, current.speed * ease * dt);
+      pushOut(knight.position, BODY_RADIUS);
+      if (progress >= 1) backToFree();
+    } else if (mode === 'stagger') {
+      modeTime += dt;
+      if (modeTime >= current.duration) backToFree();
+    } else if (mode === 'drink') {
+      modeTime += dt;
+      const progress = modeTime / current.duration;
+      if (current.full && !current.healed && progress >= FLASKS.sipAt) {
+        health = Math.min(MAX_HEALTH, health + FLASKS.heal);
+        current.healed = true;
+      }
+      if (progress >= 1) {
+        mode = 'free';
+        animator.releaseUpper();
+      }
+    }
+    // (when 'dead', nothing happens until the game respawns you)
+
+    // Walking around — also while drinking, but only slowly and without other actions.
+    if (mode === 'free' || mode === 'drink') {
+      const drinking = mode === 'drink';
+      const acted =
+        !drinking &&
+        ((attackPressed && startAttack(0)) || (dodgePressed && startDodge()) || (drinkPressed && startDrink()));
+      if (!acted) {
+        const blocking = blockHeld && !drinking;
+        animator.setUpperPose(blocking ? 'block_idle' : null);
+        if (winded && stamina.fraction >= STAMINA.runAgainAt) winded = false;
+        const wantsToRun = !blocking && !drinking && input.lengthSq() > 0 && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
+        if (wantsToRun && stamina.value <= 0) winded = true;
+        const running = wantsToRun && !winded;
+        if (running) stamina.spend(STAMINA.runPerSecond * dt);
+        if (input.lengthSq() > 0) {
+          const speed = drinking ? FLASKS.moveSpeed : blocking ? BLOCK_SPEED : running ? RUN_SPEED : WALK_SPEED;
+          knight.position.addScaledVector(input, speed * dt);
+          pushOut(knight.position, BODY_RADIUS);
+          if (target && !running) {
+            // Locked on: keep facing the enemy and step around it.
+            faceAngle = angleTo(target);
+            turnTowards(faceAngle, dt);
+            animator.locomote(strafeClip(input, faceAngle), speed);
+          } else {
+            // Running (even when locked on, like Elden Ring) turns you the way you go.
+            faceAngle = Math.atan2(input.x, input.z);
+            turnTowards(faceAngle, dt);
+            animator.locomote(running ? 'run' : 'walk', speed);
+          }
+        } else {
+          if (target) {
+            faceAngle = angleTo(target);
+            turnTowards(faceAngle, dt);
+          }
+          animator.locomote('idle');
+        }
+      }
+    }
+    attackPressed = false;
+    dodgePressed = false;
+    drinkPressed = false;
+    stamina.update(dt, { blocking: mode === 'free' && blockHeld });
+    animator.update(dt);
+
+    // The flask is in hand only while drinking, and glows brightest at the sip.
+    if (flask) {
+      flask.visible = mode === 'drink';
+      const progress = mode === 'drink' ? modeTime / current.duration : 0;
+      flask.userData.setGlow(mode === 'drink' && current.full ? Math.sin(Math.PI * Math.min(progress, 1)) : 0);
+    }
+
+    if (!active) return; // the title screen moves the camera itself
+
+    // 3. Put the camera behind the knight. If a wall is in the way, move the camera in front of it.
+    if (target) {
+      // Locked on: swing round so you're between the camera and the enemy.
+      const behind = Math.atan2(knight.position.x - target.x, knight.position.z - target.z);
+      yaw = approachAngle(yaw, behind, LOCK_FOLLOW * dt);
+      pitch += (LOCK_PITCH - pitch) * Math.min(1, LOCK_FOLLOW * dt);
+      recenterYaw = null;
+    } else if (recenterYaw !== null) {
+      yaw = approachAngle(yaw, recenterYaw, LOCK_FOLLOW * dt);
+      if (Math.abs(Math.sin(yaw - recenterYaw)) < 0.01) recenterYaw = null;
+    }
+    lookAt.set(knight.position.x, knight.position.y + CAMERA_HEIGHT, knight.position.z);
+    wanted.set(
+      Math.sin(yaw) * Math.cos(pitch),
+      Math.sin(pitch),
+      Math.cos(yaw) * Math.cos(pitch)
+    );
+    ray.set(lookAt, wanted);
+    ray.far = distance;
+    const hit = ray.intersectObjects(cameraBlockers, false)[0];
+    const camDistance = hit ? Math.max(0.5, hit.distance - 0.3) : distance;
+
+    camera.position.copy(lookAt).addScaledVector(wanted, camDistance);
+    camera.position.y = Math.max(camera.position.y, 0.3); // never below the floor
+    if (shake > 0.001) {
+      camera.position.add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(shake));
+      shake *= Math.pow(0.002, dt); // dies away in a fraction of a second
+    }
+    // Locked on, the camera aims between you and the enemy so both stay on screen.
+    camera.lookAt(target ? lookAt.lerp(target, LOCK_LOOK_SHARE) : lookAt);
+  }
+
+  return {
+    update,
+    // Switch the controls on or off (off while the title screen is showing).
+    setActive(on) {
+      active = on;
+      keys.clear();
+      blockHeld = false;
+      if (on) capture();
+    },
+    takeHit,
+    reset,
+    get mode() {
+      return mode;
+    },
+    // Shake the camera (e.g. 0.3 for a heavy hit).
+    shake(strength) {
+      shake = Math.max(shake, strength);
+    },
+    // True when the mouse has been let go (Esc) and a click is needed to carry on.
+    get mouseFree() {
+      return active && canCapture && !locked();
+    },
+    get health() {
+      return health;
+    },
+    get flasks() {
+      return flasks;
+    },
+    // Called when you try to drink with no flasks left (the HUD flashes).
+    onEmptyFlask(callback) {
+      onEmptyFlask = callback;
+    },
+    get healthFraction() {
+      return health / MAX_HEALTH;
+    },
+    // The swing in progress (null if not attacking): its number and how much damage it does.
+    get swing() {
+      return mode === 'attack' ? { id: swingCount, damage: ATTACK_DAMAGE[comboIndex] } : null;
+    },
+    get blocking() {
+      return mode === 'free' && blockHeld;
+    },
+    // True during the protected part of a dodge (for when enemies can hit you).
+    get invulnerable() {
+      return mode === 'dodge' && modeTime < current.duration * INVULNERABLE_PART;
+    },
+  };
+}

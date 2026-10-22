@@ -1,0 +1,14 @@
+node_modules/
+dist/
+
+# Raw source art and big originals: only the optimized copies in public/ are published.
+/*.glb
+/*.png
+mixamo/
+music_source/
+*.fbx
+*.blend
+*.blend1
+*.wav
+*.crdownload
+.claude/

@@ -16,7 +16,7 @@
 //   40 m     the colosseum: a ring of arcaded walls (Dungeon_wall.glb)
 
 export const SPAWN = { x: 0, z: 0, facing: Math.PI / 2 }; // resting at the bonfire, facing it
-export const GRACE = { x: 1.45, z: 0 }; // the bonfire, just in front of the spawn point
+export const GRACE = { x: 2, z: 0 }; // the bonfire, a couple of steps in front of the spawn point
 export const COURTYARD = { halfWidth: 7.5, back: 8.5, front: -6.5 };
 export const CORRIDOR = { halfWidth: 5 };
 export const GATE_Z = -26;

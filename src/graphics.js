@@ -5,6 +5,10 @@
 //   3. Bloom: bright things (fire, the Site of Grace, the flask) glow into their surroundings.
 //   4. Tone mapping and colour: film-like contrast, slightly desaturated, vignette and fine grain.
 // The picture is drawn with 4x anti-aliasing for smooth edges.
+//
+// Phones and tablets (MOBILE) get a lighter version: no ambient occlusion and no 4x anti-aliasing.
+// Their graphics chips are slower, and their less precise depth buffers make the ambient
+// occlusion smear dark patches along the triangles of walls and floors.
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -13,6 +17,10 @@ import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+
+// A touch screen as the main pointer, or a phone/tablet browser.
+export const MOBILE =
+  window.matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 
 export const LOOK = {
   environment: 0.22, // strength of the soft reflections
@@ -59,20 +67,7 @@ const GradeShader = {
   `,
 };
 
-export function createGraphics(renderer, scene, camera) {
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = LOOK.exposure;
-
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environmentIntensity = LOOK.environment;
-
-  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
-  const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 });
-  const composer = new EffectComposer(renderer, target);
-
-  composer.addPass(new RenderPass(scene, camera));
-
+function addAmbientOcclusion(composer, scene, camera, size) {
   const ao = new GTAOPass(scene, camera, size.x, size.y);
   ao.blendIntensity = LOOK.ambientOcclusion.intensity;
   ao.updateGtaoMaterial({ radius: LOOK.ambientOcclusion.radius, distanceExponent: 1, thickness: 1, scale: 1 });
@@ -90,6 +85,23 @@ export function createGraphics(renderer, scene, camera) {
     hidden.length = 0;
   };
   composer.addPass(ao);
+}
+
+export function createGraphics(renderer, scene, camera) {
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = LOOK.exposure;
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = LOOK.environment;
+
+  const size = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: MOBILE ? 0 : 4 });
+  const composer = new EffectComposer(renderer, target);
+
+  composer.addPass(new RenderPass(scene, camera));
+
+  if (!MOBILE) addAmbientOcclusion(composer, scene, camera, size);
 
   const { strength, radius, threshold } = LOOK.bloom;
   composer.addPass(new UnrealBloomPass(new THREE.Vector2(size.x, size.y), strength, radius, threshold));

@@ -17,7 +17,7 @@ import { createBoss, BOSS } from './boss.js';
 import { createFight } from './fight.js';
 import { createLockOn } from './lockOn.js';
 import { createFlask } from './flask.js';
-import { createGraphics } from './graphics.js';
+import { createGraphics, MOBILE } from './graphics.js';
 import { createDust } from './level/atmosphere.js';
 import { createStorm } from './level/weather.js';
 import { createMist } from './level/mist.js';
@@ -26,6 +26,7 @@ import { createEndCredits } from './endCredits.js';
 import { createTitleScreen } from './titleScreen.js';
 import { createMixer } from './audio.js';
 import { createEffects } from './effects.js';
+import { smoothNormals } from './smoothNormals.js';
 
 // --- Renderer: draws the 3D world onto the page ---
 // (Anti-aliasing is done by the effects in graphics.js, so it's off here.)
@@ -39,10 +40,10 @@ if (!document.createElement('canvas').getContext('webgl2')) {
   throw new Error('WebGL 2 is not available');
 }
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, MOBILE ? 1.5 : 2)); // phones: fewer pixels to fill
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
 // --- Scene: the "world" everything lives in ---
@@ -65,14 +66,15 @@ const MOON_OFFSET = new THREE.Vector3(25, 50, 10);
 const moon = new THREE.DirectionalLight(0x9fb6e8, 3.4); // strong, so stone edges catch cold highlights
 moon.position.copy(MOON_OFFSET);
 moon.castShadow = true;
-moon.shadow.mapSize.set(2048, 2048);
+moon.shadow.mapSize.setScalar(MOBILE ? 1024 : 2048);
 moon.shadow.camera.left = -30;
 moon.shadow.camera.right = 30;
 moon.shadow.camera.top = 30;
 moon.shadow.camera.bottom = -30;
 moon.shadow.camera.far = 150;
-moon.shadow.bias = -0.0005;
-moon.shadow.normalBias = 0.02;
+// Phones store shadow depths less precisely: a bigger bias stops surfaces speckling with "shadow acne".
+moon.shadow.bias = MOBILE ? -0.002 : -0.0005;
+moon.shadow.normalBias = MOBILE ? 0.06 : 0.02;
 scene.add(moon, moon.target);
 
 // The storm sky (clouds, lightning, thunder), dust drifting through the air, and mist.
@@ -128,10 +130,16 @@ const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
 
 // Loads a model and returns it, with its animations (if any) in `model.animations`.
+// Its surfaces get smooth shading (see smoothNormals.js).
 function loadModel(url) {
   return loader.loadAsync(url).then((gltf) => {
+    const smoothed = new Set();
     gltf.scene.traverse((obj) => {
       if (obj.isMesh) {
+        if (!smoothed.has(obj.geometry)) {
+          smoothNormals(obj.geometry);
+          smoothed.add(obj.geometry);
+        }
         obj.castShadow = true;
         obj.receiveShadow = true;
         obj.frustumCulled = !obj.isSkinnedMesh; // animated meshes can move outside their box
@@ -311,8 +319,8 @@ function step(realDt) {
     // Title screen: a low view from the side, the knight standing on the left, the bonfire on
     // the right, and the ruins and the tower beyond; the camera drifts very slowly.
     const drift = Math.sin(time * 0.05);
-    camera.position.set(knight.position.x + 0.8 + drift * 0.3, 1.78 + drift * 0.05, knight.position.z + 6.6 - drift * 0.2);
-    camera.lookAt(knight.position.x + 0.8, 1.78, knight.position.z - 4); // level: the knight stands in the gap between the logo and Start
+    camera.position.set(knight.position.x + 1.0 + drift * 0.3, 1.78 + drift * 0.05, knight.position.z + 6.6 - drift * 0.2);
+    camera.lookAt(knight.position.x + 1.0, 1.78, knight.position.z - 4); // level: the knight stands in the gap between the logo and Start
   } else if (handOff) {
     // Just after Start: glide from the title view to the normal camera behind the knight.
     handOff.time += dt;

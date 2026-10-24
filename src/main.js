@@ -7,6 +7,7 @@ import { buildLevel } from './level/level.js';
 import { makeGlowTexture } from './level/textures.js';
 import { SPAWN, ARENA } from './level/layout.js';
 import { createPlayer } from './player.js';
+import { FIRE_SHADOW_LAYER } from './level/siteOfGrace.js';
 import { createAnimator } from './animator.js';
 import { equipWeapon, equipShield, holdInLeftHand, WEAPONS } from './equipment.js';
 import { createStamina } from './stamina.js';
@@ -20,6 +21,7 @@ import { createGraphics } from './graphics.js';
 import { createDust } from './level/atmosphere.js';
 import { createStorm } from './level/weather.js';
 import { createMist } from './level/mist.js';
+import { groundHeight } from './level/colliders.js';
 import { createEndCredits } from './endCredits.js';
 import { createTitleScreen } from './titleScreen.js';
 import { createMixer } from './audio.js';
@@ -27,6 +29,15 @@ import { createEffects } from './effects.js';
 
 // --- Renderer: draws the 3D world onto the page ---
 // (Anti-aliasing is done by the effects in graphics.js, so it's off here.)
+// The game needs the browser's 3D graphics (WebGL 2); some browsers have it switched off.
+if (!document.createElement('canvas').getContext('webgl2')) {
+  window.showProblem(
+    "Darkfate needs 3D graphics (WebGL 2), and this browser has them switched off or doesn't support them.<br><br>" +
+      'Try Chrome or Edge, and make sure <b>"Use graphics acceleration when available"</b> is on ' +
+      '(Settings → System), then restart the browser.'
+  );
+  throw new Error('WebGL 2 is not available');
+}
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -36,7 +47,7 @@ document.body.appendChild(renderer.domElement);
 
 // --- Scene: the "world" everything lives in ---
 // A cold, misty night: distant things fade into dark blue-grey fog.
-const SKY = 0x111724;
+const SKY = 0x151d2b; // the night haze (also the fog colour, so distant things melt into the sky)
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
 scene.fog = new THREE.FogExp2(SKY, 0.021);
@@ -54,7 +65,7 @@ const MOON_OFFSET = new THREE.Vector3(25, 50, 10);
 const moon = new THREE.DirectionalLight(0x9fb6e8, 3.4); // strong, so stone edges catch cold highlights
 moon.position.copy(MOON_OFFSET);
 moon.castShadow = true;
-moon.shadow.mapSize.set(4096, 4096);
+moon.shadow.mapSize.set(2048, 2048);
 moon.shadow.camera.left = -30;
 moon.shadow.camera.right = 30;
 moon.shadow.camera.top = 30;
@@ -66,13 +77,14 @@ scene.add(moon, moon.target);
 
 // The storm sky (clouds, lightning, thunder), dust drifting through the air, and mist.
 const storm = createStorm(scene, { horizonColor: SKY, moonDirection: new THREE.Vector3(60, 90, -200) });
-const dust = createDust(makeGlowTexture(), { minX: -20, maxX: 20, minZ: -80, maxZ: 10 });
+const dust = createDust(makeGlowTexture(), { minX: -20, maxX: 20, minZ: ARENA.z - 25, maxZ: 10 });
 scene.add(dust);
 const mistGroups = [];
 for (let k = 1; k < 18; k++) {
   // Filling the chasm around the arena platform (well below the bridge, which is at k = 0).
   const a = (k / 18) * Math.PI * 2;
-  mistGroups.push({ count: 2, center: new THREE.Vector3(Math.sin(a) * 22.5, -8, ARENA.z + Math.cos(a) * 22.5), spread: [4, 5, 4], size: [10, 16], opacity: 0.5 });
+  const r = (ARENA.platform + ARENA.chasm) / 2;
+  mistGroups.push({ count: 3, center: new THREE.Vector3(Math.sin(a) * r, -8, ARENA.z + Math.cos(a) * r), spread: [9, 5, 9], size: [12, 20], opacity: 0.5 });
 }
 mistGroups.push({ count: 10, center: new THREE.Vector3(0, 1.2, ARENA.z), spread: [36, 1, 36], size: [8, 14], opacity: 0.12 }); // low over the arena
 mistGroups.push({ count: 6, center: new THREE.Vector3(0, 1.5, -14), spread: [8, 1, 18], size: [6, 10], opacity: 0.1 }); // in the corridor
@@ -82,7 +94,7 @@ scene.add(mist);
 
 
 const graphics = createGraphics(renderer, scene, camera);
-const effects = createEffects(scene);
+const effects = createEffects(scene, camera);
 
 // --- Title screen: the camera slowly circles the knight until you press Start ---
 // --- Sound: music, wind and thunder (see audio.js) ---
@@ -95,6 +107,7 @@ const unlockSound = () => mixer.unlock();
 window.addEventListener('pointerdown', unlockSound, { once: true });
 window.addEventListener('keydown', unlockSound, { once: true });
 
+// On Start the camera glides round behind the knight, standing in his sword-and-shield idle.
 const title = createTitleScreen(() => {
   player.setActive(true);
   document.body.classList.remove('on-title');
@@ -108,7 +121,7 @@ const credits = createEndCredits(mixer, () => {
   document.body.classList.add('on-title');
 });
 let handOff = null; // smooth camera move from the title view to behind the knight
-const HAND_OFF_SECONDS = 1.4;
+const HAND_OFF_SECONDS = 1.8;
 
 // --- Loading 3D models ---
 const loader = new GLTFLoader();
@@ -137,11 +150,35 @@ stamina.onEmpty(() => hud.stamina.flash()); // bar flashes when you try somethin
 // --- The level: spawn courtyard, corridor, fog gate, boss arena ---
 const level = buildLevel(scene, loadModel);
 
-// The tower: a few warm lit windows high up, and thick mist rolling round its base.
+// The tower: the landmark behind the boss, so it must read through the gloom. The night fog
+// would swallow it at this distance, so it gets a much thinner fog of its own, a faint cold
+// glow of its own so its carvings show, and a moonlit spotlight washing up its face. Plus a few warm lit windows high up, and thick mist rolling
+// round its base.
+const TOWER_FOG = 0.3; // its fog, as a share of the scene's
 let towerMist = null;
 level.towerReady.then((tower) => {
   const box = new THREE.Box3().setFromObject(tower);
   const size = box.getSize(new THREE.Vector3());
+  tower.traverse((o) => {
+    if (!o.isMesh) return;
+    o.material = o.material.clone();
+    o.material.emissive = new THREE.Color(0.1, 0.11, 0.15);
+    o.material.emissiveMap = o.material.map;
+    o.material.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <fog_fragment>',
+        `#ifdef USE_FOG
+           float towerFog = 1.0 - exp(-fogDensity * fogDensity * ${(TOWER_FOG * TOWER_FOG).toFixed(3)} * vFogDepth * vFogDepth);
+           gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, towerFog);
+         #endif`
+      );
+    };
+  });
+  const top = new THREE.Vector3((box.min.x + box.max.x) / 2, box.max.y, (box.min.z + box.max.z) / 2);
+  const moonlight = new THREE.SpotLight(0x9fb4e6, 900, 160, THREE.MathUtils.degToRad(16), 0.6, 1.2);
+  moonlight.position.set(top.x + 25, box.min.y + 6, box.max.z + 55); // low and in front: lights it from below
+  moonlight.target.position.set(top.x, box.min.y + size.y * 0.6, top.z);
+  scene.add(moonlight, moonlight.target);
   const windowGlow = new THREE.SpriteMaterial({ map: makeGlowTexture(), color: new THREE.Color(2.4, 0.95, 0.3), depthWrite: false, blending: THREE.AdditiveBlending });
   for (let i = 0; i < 7; i++) {
     const glint = new THREE.Sprite(windowGlow);
@@ -166,6 +203,7 @@ level.towerReady.then((tower) => {
 let knight = null;
 let player = null;
 let fight = null;
+let bossFigure = null; // the boss model (for the game loop)
 const optional = (url) => loadModel(url).catch(() => null);
 
 // Stand a model on the floor at (x, z), facing `angle`.
@@ -173,6 +211,7 @@ function place(model, x, z, angle) {
   model.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(model);
   model.position.set(x, -box.min.y, z);
+  model.userData.standY = -box.min.y; // its height when standing on flat ground (see followGround)
   model.rotation.y = angle;
   scene.add(model);
 }
@@ -186,12 +225,11 @@ Promise.all([
 ])
   .then(([knightModel, sword, shield, bossModel, bossSword]) => {
     knight = knightModel;
-    // Stone statues of the knight in the colosseum's upper arches (copied before it gets its gear).
-    level.addStatues(knight, knight.animations.find((c) => c.name === 'block_idle'));
     place(knight, SPAWN.x, SPAWN.z, SPAWN.facing);
     // Equip before animations start (it measures the hands in their resting pose).
     if (sword) equipWeapon(knight, sword, WEAPONS.knightSword);
     if (shield) equipShield(knight, shield);
+    knight.traverse((o) => o.isMesh && o.layers.enable(FIRE_SHADOW_LAYER)); // the bonfire throws his shadow
     const flask = createFlask();
     holdInLeftHand(knight, flask);
     const lockOn = createLockOn(scene, knight);
@@ -203,6 +241,7 @@ Promise.all([
     // The boss stands toward the back of the arena, facing the fog gate.
     bossModel.scale.setScalar(BOSS.scale);
     place(bossModel, 0, ARENA.z - 6, 0);
+    bossFigure = bossModel;
     if (bossSword) equipWeapon(bossModel, bossSword, WEAPONS.bossSword);
     const bossAnimator = createAnimator(bossModel, bossModel.animations, { scale: BOSS.scale });
     const bossBlade = createBlade(bossSword ?? bossModel, WEAPONS.bossSword);
@@ -227,6 +266,7 @@ Promise.all([
       }, 1800),
     });
     title.ready();
+    window.gameReady = true; // (index.html stops reporting start-up problems)
   })
   .catch((err) => {
     console.error(err);
@@ -258,6 +298,8 @@ function step(realDt) {
   if (!player) return;
   player.update(dt);
   fight.update(dt);
+  followGround(knight, dt);
+  followGround(bossFigure, dt);
   updateMusic();
   hud.stamina.update(stamina.fraction, dt);
   hud.setFlasks(player.flasks);
@@ -266,18 +308,26 @@ function step(realDt) {
   moon.position.copy(knight.position).add(MOON_OFFSET);
 
   if (title.active) {
-    // Title screen: circle slowly around the knight at the Site of Grace.
-    const angle = time * 0.06 + 2.4;
-    camera.position.set(knight.position.x + Math.sin(angle) * 6, 1.5, knight.position.z + Math.cos(angle) * 6);
-    camera.lookAt(knight.position.x, 1.55, knight.position.z); // the knight stands between the logo and Start
+    // Title screen: a low view from the side, the knight standing on the left, the bonfire on
+    // the right, and the ruins and the tower beyond; the camera drifts very slowly.
+    const drift = Math.sin(time * 0.05);
+    camera.position.set(knight.position.x + 0.8 + drift * 0.3, 1.78 + drift * 0.05, knight.position.z + 6.6 - drift * 0.2);
+    camera.lookAt(knight.position.x + 0.8, 1.78, knight.position.z - 4); // level: the knight stands in the gap between the logo and Start
   } else if (handOff) {
     // Just after Start: glide from the title view to the normal camera behind the knight.
     handOff.time += dt;
     const t = THREE.MathUtils.smoothstep(handOff.time / HAND_OFF_SECONDS, 0, 1);
     camera.position.lerpVectors(handOff.position, camera.position, t);
-    camera.quaternion.slerpQuaternions(handOff.quaternion, camera.quaternion, t);
+    camera.quaternion.slerpQuaternions(handOff.quaternion, camera.quaternion.clone(), t); // (a copy: the target is the camera itself)
     if (t >= 1) handOff = null;
   }
+}
+
+// The arena floor isn't flat: characters rise and sink with it (smoothly, so small bumps
+// don't make them jitter).
+function followGround(model, dt) {
+  const target = model.userData.standY + groundHeight(model.position.x, model.position.z);
+  model.position.y += (target - model.position.y) * Math.min(1, dt * 12);
 }
 
 // Music follows the fight, always crossfading smoothly:

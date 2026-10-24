@@ -7,6 +7,10 @@
 //   attack    swings at you (close-range swings, or leaping/spinning ones from further away)
 //   recover   a short pause after attacking: your chance to hit back
 //   stagger   flinches after taking enough damage in a short time
+//
+// Every hit also makes it recoil (on top of whatever it's doing): its upper body snaps back
+// away from the blow, it's shoved back half a step, and its body flashes white-hot, cooling
+// to red. A giant doesn't drop its attack for one cut; only its poise breaking does that.
 //   dead      falls and stays down
 import * as THREE from 'three';
 import { pushOut } from './level/colliders.js';
@@ -24,6 +28,8 @@ export const BOSS = {
   poiseResetTime: 4,
   recoverTime: [0.4, 1.1], // random pause after each attack (seconds)
   bladeCutSpeed: 5, // the blade hurts only while moving faster than this (m/s)
+  flashTime: 0.16, // seconds the body glows after a hit
+  recoil: { angle: 0.3, twist: 0.45, shove: 2.4 }, // radians (at full strength), share of that as a twist, m/s
 };
 
 // `range` is the distance (m) at which the boss chooses that attack.
@@ -48,7 +54,7 @@ export function createBoss(boss, animator, blade, home) {
   let hitThisSwing = false;
   let waitLeft = 0;
   let strafeSide = 1;
-  let flash = 0; // glows red for a moment when hit
+  let flash = 0; // glows for a moment when hit
   const toPlayer = new THREE.Vector3();
   const materials = [];
   boss.traverse((o) => {
@@ -97,6 +103,48 @@ export function createBoss(boss, animator, blade, home) {
     // Each bone takes its share of the turn (a turn in world space, converted to the bone's own space).
     for (const { bone, share } of LOOK_BONES) {
       part.slerpQuaternions(NO_TURN, turn, share * lookWeight);
+      bone.parent.getWorldQuaternion(parentTurn);
+      bone.quaternion.premultiply(parentTurn.clone().invert().multiply(part).multiply(parentTurn));
+      bone.updateMatrixWorld(true);
+    }
+  }
+
+  // --- Recoiling from a hit ---
+  // The spine and head bend back away from the blow and twist a little: a sharp snap, then
+  // settling back over half a second, added after the animation (like the glare above).
+  const RECOIL_BONES = [['spine_01', 0.25], ['spine_02', 0.3], ['spine_03', 0.3], ['head', 0.15]]
+    .map(([name, share]) => ({ bone: boss.getObjectByName(name), share }))
+    .filter((b) => b.bone);
+  const UP = new THREE.Vector3(0, 1, 0);
+  const recoilAxis = new THREE.Vector3();
+  const knock = new THREE.Vector3(); // shove velocity (m/s)
+  const bend = new THREE.Quaternion();
+  const twist = new THREE.Quaternion();
+  let recoilTime = Infinity;
+  let recoilStrength = 0;
+  let recoilTwist = 0;
+
+  function recoil(from, strength) {
+    const away = new THREE.Vector3().subVectors(boss.position, from).setY(0);
+    if (away.lengthSq() < 1e-6) away.copy(forward()).negate();
+    away.normalize();
+    recoilAxis.crossVectors(UP, away).normalize(); // turning about this tips the top away from you
+    recoilTime = 0;
+    recoilStrength = strength;
+    recoilTwist = (Math.random() < 0.5 ? -1 : 1) * BOSS.recoil.twist;
+    knock.copy(away).multiplyScalar(BOSS.recoil.shove * strength);
+  }
+
+  function applyRecoil(dt) {
+    recoilTime += dt;
+    const t = recoilTime;
+    const amount = t < 0.05 ? t / 0.05 : Math.exp(-(t - 0.05) * 7); // snap, then settle
+    if (amount < 0.01 || state === 'dead') return;
+    const angle = BOSS.recoil.angle * recoilStrength * amount;
+    bend.setFromAxisAngle(recoilAxis, angle).multiply(twist.setFromAxisAngle(UP, angle * recoilTwist));
+    boss.updateMatrixWorld(true);
+    for (const { bone, share } of RECOIL_BONES) {
+      part.slerpQuaternions(NO_TURN, bend, share);
       bone.parent.getWorldQuaternion(parentTurn);
       bone.quaternion.premultiply(parentTurn.clone().invert().multiply(part).multiply(parentTurn));
       bone.updateMatrixWorld(true);
@@ -198,13 +246,21 @@ export function createBoss(boss, animator, blade, home) {
       if (stateTime >= current.duration) backToChase();
     }
 
+    // Shoved back by a hit (quickly slowing to a stop).
+    if (state !== 'dead' && knock.lengthSq() > 1e-4) {
+      boss.position.addScaledVector(knock, dt);
+      knock.multiplyScalar(Math.max(0, 1 - dt * 9));
+    }
     pushOut(boss.position, BOSS.body.radius);
     animator.update(dt);
     lookAtPlayer(player, dt);
+    applyRecoil(dt);
     blade.update(dt);
 
+    // The hit flash: white-hot at first, cooling through orange to dark red as it fades.
     flash = Math.max(0, flash - dt);
-    for (const m of materials) m.emissive.setRGB(flash * 3, flash * 0.4, 0);
+    const k = flash / BOSS.flashTime;
+    for (const m of materials) m.emissive.setRGB(0.42 * k, 0.28 * k * k, 0.18 * k * k * k);
   }
 
   // --- Things the fight tells the boss ---
@@ -214,12 +270,13 @@ export function createBoss(boss, animator, blade, home) {
     setState('intro');
   }
 
-  // Returns true if this hit killed it.
-  function takeDamage(amount) {
+  // `from`: where the blow came from. Returns true if this hit killed it.
+  function takeDamage(amount, from) {
     if (state === 'dead') return false;
     health = Math.max(0, health - amount);
     sinceHit = 0;
-    flash = 0.15;
+    flash = BOSS.flashTime;
+    if (from && health > 0) recoil(from, THREE.MathUtils.clamp(amount / 55, 0.7, 1.4)); // harder blows rock it further
     if (health <= 0) {
       animator.perform('death');
       setState('dead');
@@ -246,6 +303,8 @@ export function createBoss(boss, animator, blade, home) {
     boss.position.copy(home.position);
     boss.rotation.y = home.angle;
     lookWeight = 0;
+    recoilTime = Infinity;
+    knock.set(0, 0, 0);
     animator.release();
     animator.locomote('idle');
     setState('dormant');

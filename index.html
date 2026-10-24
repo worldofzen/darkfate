@@ -10,9 +10,43 @@
         position: fixed; left: 32px; bottom: 16px; color: #8a8270;
         font: 13px system-ui, sans-serif; pointer-events: none;
       }
+      #problem {
+        position: fixed; inset: 0; z-index: 100; display: none; align-items: center; justify-content: center;
+        background: #0b0b0e; color: #d9cfb6; font: 16px Georgia, serif; line-height: 1.5; padding: 24px;
+      }
+      #problem div { max-width: 640px; }
+      #problem code { display: block; margin-top: 12px; color: #c46a5a; font: 13px ui-monospace, monospace; white-space: pre-wrap; }
     </style>
+    <script>
+      // If the game can't start, say so on screen instead of leaving a blank dark page.
+      window.showProblem = function (message, detail) {
+        var box = document.getElementById('problem');
+        if (!box || box.dataset.shown) return;
+        box.dataset.shown = '1';
+        box.innerHTML = '<div>' + message + (detail ? '<code></code>' : '') + '</div>';
+        if (detail) box.querySelector('code').textContent = detail;
+        box.style.display = 'flex';
+      };
+      var startFailed = 'Darkfate could not start. Try reloading the page (Ctrl + F5). If this keeps happening, send this message:';
+      // (Only while starting up: once the title screen is ready, main.js sets window.gameReady.)
+      window.addEventListener('error', function (e) {
+        if (window.gameReady) return;
+        showProblem(startFailed, e.message || 'A game file could not be loaded: ' + (e.target && e.target.src));
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) {
+        if (window.gameReady) return;
+        showProblem(startFailed, String((e.reason && (e.reason.stack || e.reason.message)) || e.reason));
+      });
+      // The title screen appears within a second or two; if it hasn't after 10 s, something is wrong.
+      setTimeout(function () {
+        if (!document.querySelector('.title') && !document.querySelector('canvas')) {
+          showProblem(startFailed, 'The game did not start within 10 seconds (no error was reported).');
+        }
+      }, 10000);
+    </script>
   </head>
   <body>
+    <div id="problem"></div>
     <div id="help">WASD: walk · Shift: run · Left click: attack · Right click (hold): block · Space: dodge · Q / middle click: lock on · R: drink flask · Mouse: look · Esc: free the mouse · Scroll: zoom</div>
     <script type="module" src="/src/main.js"></script>
   </body>

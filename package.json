@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "animations": "node tools/build-animated.mjs mixamo/Knight mixamo/Knight_reference.glb public/models/Knight.glb",
     "animations:boss": "node tools/build-animated.mjs mixamo/BOSS mixamo/BOSS_reference.glb public/models/BOSS.glb",
-    "textures": "node tools/make_textures.mjs"
+    "textures": "node tools/make_textures.mjs",
+    "hud": "node tools/make_hud.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"

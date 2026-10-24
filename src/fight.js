@@ -110,10 +110,13 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, leve
     ) {
       lastSwingThatHit = swing.id;
       const at = bossChest.getWorldPosition(new THREE.Vector3());
+      // The slash flashes across the front of its body, on your side, along your blade's path.
+      const cut = at.clone().addScaledVector(apart.setY(0).normalize(), -BOSS.body.radius * 0.7);
+      effects.slash(cut, playerBlade.motion(), swing.damage > 55 ? 2.9 : 2.3);
       effects.blood(at, knight.position);
-      effects.hitStop(0.05);
-      player.shake(0.06);
-      if (boss.takeDamage(swing.damage)) {
+      effects.hitStop(0.06);
+      player.shake(0.08);
+      if (boss.takeDamage(swing.damage, knight.position)) {
         state = 'won';
         timer = 0;
         hud.showBanner('ENEMY FELLED', 'felled', 4);

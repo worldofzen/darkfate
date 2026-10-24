@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 
 // Texture sizes in the world: the floor and wall textures each cover 2 x 2 m, dirt 1 x 1 m.
-export const TEXTURE_METERS = { floor: 2, wall: 3, dirt: 1 }; // wall blocks come out ~1.5 x 0.75 m
+export const TEXTURE_METERS = { floor: 2, wall: 3, dirt: 1, rock: 0.8 }; // wall blocks come out ~1.5 x 0.75 m
 
 const loader = new THREE.TextureLoader();
 
@@ -35,6 +35,8 @@ export const wallStone = stoneMaterial('wall');
 // Fluted, weathered column stone: the texture wraps once around a column (see fluteUVs).
 export const pillarStone = stoneMaterial('pillar');
 export const rockStone = stoneMaterial('floor', { flatShading: true });
+// Chisel-hammered stone for the broken blocks lying around (cracks and moss come from vertex colours).
+export const brokenStone = stoneMaterial('rock', { vertexColors: true });
 // Dirt for flat ground whose texture coordinates are measured in meters (the texture covers 1 m).
 export const dirtMeters = stoneMaterial('dirt');
 

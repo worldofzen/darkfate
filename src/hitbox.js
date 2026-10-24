@@ -43,6 +43,11 @@ export function createBlade(weapon, { guardY, tipY = 0 }) {
       return speed;
     },
 
+    // Which way the tip moved since last frame (for effects that follow the cut).
+    motion(target = new THREE.Vector3()) {
+      return target.subVectors(tip, lastTip);
+    },
+
     // Did the blade pass through `body` ({ position, radius, height }) since last frame?
     hits(body) {
       const r2 = body.radius * body.radius;

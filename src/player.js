@@ -1,7 +1,7 @@
 // The player: movement, combat and the third-person camera.
 //
 //   WASD          walk (relative to where the camera looks)    Shift   run
-//   Left click    attack (click again during a swing to chain up to 3 hits)
+//   Left click    attack (click again during a swing to chain a second, harder hit)
 //   Right click   hold to block with the shield (you can walk while blocking)
 //   Space         dodge: leap toward the direction you're pressing, or backstep if none
 //   Q / middle click   lock on to the boss (again to let go; with nothing to lock onto,
@@ -22,8 +22,8 @@ export const PLAYER_BODY = { radius: 0.45, height: 1.85 }; // for sword hit dete
 const MAX_HEALTH = 300;
 
 // Attacks: each click plays the next swing in this list.
-const ATTACK_CHAIN = ['attack_4', 'slash', 'slash_3'];
-const ATTACK_DAMAGE = [45, 50, 65]; // damage of each hit in the chain (the finisher hits hardest)
+const ATTACK_CHAIN = ['slash', 'slash_3'];
+const ATTACK_DAMAGE = [50, 65]; // damage of each hit in the chain (the finisher hits hardest)
 const ATTACK_TIME_SCALE = 1.3; // play the swings a little faster than the pack does
 const COMBO_OPENS = 0.35; // a click after 35% of the swing is remembered for the next one
 const RECOVERY = 0.75; // after 75% of the swing you can chain, dodge or walk away

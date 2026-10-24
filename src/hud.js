@@ -1,9 +1,13 @@
 // On-screen bars and messages, styled after Elden Ring:
-//   - your health (red) and stamina (green): thin bars with a gold frame in the top-left
-//   - the boss's name and health along the bottom during the fight
+//   - your health: an ornate crimson bar with a blood-red gem (ui/health_bar_*.webp), and
+//     your stamina (green) under it, in the top-left
+//   - the boss's name and its gothic crimson health bar (ui/boss_bar_*.webp) along the bottom
 //   - big "YOU DIED" / "ENEMY FELLED" messages
-//   - the Flask of Crimson Tears slot in the bottom-left, with how many charges are left
+//   - the Flask of Crimson Tears slot in the bottom-left (ui/flask.webp), with how many charges are left
 // When a bar drops, a pale "ghost" piece shows how much was just lost, then shrinks away.
+//
+// The two health bars are pictures: an "empty" frame, with the "full" picture shown on top only
+// up to the current health (tools/make_hud.mjs makes both from the original art).
 
 const style = document.createElement('style');
 style.textContent = `
@@ -18,17 +22,25 @@ style.textContent = `
   .hud-ghost { background: rgba(232, 226, 170, 0.75); }
   .hud-fill { transition: filter 0.15s; }
   .hud-stamina .hud-fill { background: linear-gradient(#6cb35a, #3b7a33 60%, #2d6127); }
-  .hud-health { width: 300px; }
-  .hud-health .hud-fill, .hud-boss .hud-fill { background: linear-gradient(#c23a2e, #8e1e17 60%, #6e1410); }
+
+  /* Picture bars: three stacked copies of the art (empty frame, ghost, full). */
+  .hud-art { position: relative; }
+  .hud-art img { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; -webkit-user-drag: none; }
+  .hud-art .hud-art-ghost { filter: brightness(1.9) saturate(0.35); opacity: 0.85; }
+  .hud-art.empty-flash { animation: hud-art-flash 0.35s; }
+  @keyframes hud-art-flash { 40% { filter: drop-shadow(0 0 6px #e0573a) brightness(1.3); } }
+  .hud-health { width: 400px; aspect-ratio: 5.4795; margin-left: -10px; margin-bottom: -6px;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8)); }
+  .hud-stamina { width: 300px; margin-left: 54px; } /* lined up under the red channel */
 
   .hud-bossbar {
-    position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
-    width: min(70vw, 900px); pointer-events: none; opacity: 0; transition: opacity 0.8s;
+    position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%);
+    width: min(76vw, 1000px); pointer-events: none; opacity: 0; transition: opacity 0.8s;
   }
   .hud-bossbar.shown { opacity: 1; }
-  .hud-bossname { color: #e6dcc4; font: 17px Georgia, 'Times New Roman', serif; margin-bottom: 6px;
-    text-shadow: 0 1px 3px #000; letter-spacing: 0.02em; }
-  .hud-boss { width: 100%; height: 10px; }
+  .hud-bossname { color: #e6dcc4; font: 17px Georgia, 'Times New Roman', serif; margin: 0 0 -14px 10%;
+    text-shadow: 0 1px 3px #000; letter-spacing: 0.02em; position: relative; z-index: 1; }
+  .hud-boss { width: 100%; aspect-ratio: 6.4057; filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.85)); }
 
   .hud-banner {
     position: fixed; left: 0; right: 0; top: 42%; text-align: center; pointer-events: none;
@@ -44,13 +56,13 @@ style.textContent = `
   .hud-banner.felled { color: #d9b866; }
   @media (max-width: 600px) { .hud-banner { font-size: 40px; } }
   .hud-flask {
-    position: fixed; left: 32px; bottom: 64px; width: 58px; height: 58px; pointer-events: none;
+    position: fixed; left: 32px; bottom: 64px; width: 64px; height: 64px; pointer-events: none;
     display: flex; align-items: center; justify-content: center;
     background: radial-gradient(rgba(20, 16, 12, 0.75), rgba(8, 6, 4, 0.6));
     border: 1px solid rgba(196, 174, 120, 0.55); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
   }
-  .hud-flask svg { width: 34px; height: 40px; filter: drop-shadow(0 0 5px rgba(220, 40, 30, 0.6)); }
-  .hud-flask.none svg { filter: grayscale(1) brightness(0.5); }
+  .hud-flask img { height: 52px; filter: drop-shadow(0 0 6px rgba(220, 40, 30, 0.55)); }
+  .hud-flask.none img { filter: grayscale(1) brightness(0.45); }
   .hud-flask-count {
     position: absolute; right: 4px; bottom: 1px; color: #efe6cf;
     font: 15px Georgia, 'Times New Roman', serif; text-shadow: 0 1px 2px #000;
@@ -76,6 +88,13 @@ style.textContent = `
   }
 `;
 document.head.appendChild(style);
+
+// Where the red channel is in each bar picture (% from each edge), as measured by
+// tools/make_hud.mjs (see public/ui/hud_bars.json).
+const BAR_ART = {
+  health: { file: 'health_bar', left: 15.917, right: 6.583, top: 36.073, bottom: 36.073 },
+  boss: { file: 'boss_bar', left: 8.833, right: 9.056, top: 43.772, bottom: 35.943 },
+};
 
 const GHOST_HOLD = 0.6; // seconds the ghost piece waits before shrinking
 const GHOST_SPEED = 0.6; // how fast it shrinks (fraction of the bar per second)
@@ -112,11 +131,48 @@ function createBar(container, className) {
   };
 }
 
+// A bar drawn from a picture: the "full" art is shown only up to `fraction` of the red channel.
+function createArtBar(container, className, art) {
+  const bar = document.createElement('div');
+  bar.className = `hud-art ${className}`;
+  bar.innerHTML = `
+    <img src="ui/${art.file}_empty.webp" alt="">
+    <img class="hud-art-ghost" src="ui/${art.file}_full.webp" alt="">
+    <img class="hud-art-fill" src="ui/${art.file}_full.webp" alt="">`;
+  container.appendChild(bar);
+  const ghost = bar.querySelector('.hud-art-ghost');
+  const fill = bar.querySelector('.hud-art-fill');
+  const span = 100 - art.left - art.right;
+  // Show the full picture only inside the channel, from its left end to `fraction` of the way.
+  const clip = (fraction) => `inset(${art.top}% ${100 - art.left - span * fraction}% ${art.bottom}% ${art.left}%)`;
+
+  let ghostValue = 1;
+  let hold = 0;
+  let last = 1;
+  return {
+    element: bar,
+    update(fraction, dt) {
+      if (fraction < last) hold = GHOST_HOLD;
+      last = fraction;
+      if (hold > 0) hold -= dt;
+      else ghostValue = Math.max(fraction, ghostValue - GHOST_SPEED * dt);
+      if (fraction > ghostValue) ghostValue = fraction;
+      fill.style.clipPath = clip(fraction);
+      ghost.style.clipPath = clip(ghostValue);
+    },
+    flash() {
+      bar.classList.remove('empty-flash');
+      void bar.offsetWidth; // restart the animation
+      bar.classList.add('empty-flash');
+    },
+  };
+}
+
 export function createHud() {
   const container = document.createElement('div');
   container.className = 'hud';
   document.body.appendChild(container);
-  const health = createBar(container, 'hud-health');
+  const health = createArtBar(container, 'hud-health', BAR_ART.health);
   const stamina = createBar(container, 'hud-stamina');
 
   const bossPanel = document.createElement('div');
@@ -125,17 +181,12 @@ export function createHud() {
   bossName.className = 'hud-bossname';
   bossPanel.appendChild(bossName);
   document.body.appendChild(bossPanel);
-  const boss = createBar(bossPanel, 'hud-boss');
+  const boss = createArtBar(bossPanel, 'hud-boss', BAR_ART.boss);
 
   const flaskSlot = document.createElement('div');
   flaskSlot.className = 'hud-flask';
   flaskSlot.innerHTML = `
-    <svg viewBox="0 0 34 40" aria-hidden="true">
-      <rect x="13" y="1" width="8" height="5" rx="1" fill="#6b4a2c"/>
-      <path d="M13 6h8v7c7 2 11 8 11 14 0 8-6 12-15 12S2 35 2 27c0-6 4-12 11-14z"
-            fill="rgba(170,180,190,0.25)" stroke="rgba(220,225,230,0.7)" stroke-width="1.2"/>
-      <path d="M4.5 25c3-1.5 7 1 12.5 0s9-2 12.5 0c0.5 6-5 11.5-12.5 11.5S4 31.5 4.5 25z" fill="#c4161c"/>
-    </svg>
+    <img src="ui/flask.webp" alt="Flask of Crimson Tears">
     <span class="hud-flask-count"></span>`;
   document.body.appendChild(flaskSlot);
   const flaskCount = flaskSlot.querySelector('.hud-flask-count');

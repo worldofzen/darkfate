@@ -1,6 +1,7 @@
 // Invisible shapes that stop the player from walking through things.
 // We only care about the ground plan (seen from above), so every obstacle is
-// either a circle (columns, fire bowls) or a rotated rectangle (walls, fallen stones).
+// either a circle (columns, fire bowls), a rotated rectangle (walls, fallen stones)
+// or a solid cell of a height map (rock spikes on the arena floor).
 
 const circles = [];
 const boxes = [];
@@ -61,10 +62,57 @@ function keepOnWalkArea(pos, radius) {
   }
 }
 
+// --- Uneven ground ---
+// A height map (a grid of floor heights, seen from above) for floors that aren't flat, like
+// the arena platform. Cells can also be marked solid: rock spikes, broken-away edges.
+// `map` is { minX, minZ, cell, cols, rows, height: Float32Array, solid: Uint8Array }.
+let ground = null;
+export function setGroundMap(map) {
+  ground = map;
+}
+
+// How high the floor is at (x, z): 0 except where the height map says otherwise.
+export function groundHeight(x, z) {
+  if (!ground) return 0;
+  const gx = (x - ground.minX) / ground.cell - 0.5;
+  const gz = (z - ground.minZ) / ground.cell - 0.5;
+  if (gx < 0 || gz < 0 || gx >= ground.cols - 1 || gz >= ground.rows - 1) return 0;
+  const ix = Math.floor(gx);
+  const iz = Math.floor(gz);
+  const fx = gx - ix;
+  const fz = gz - iz;
+  const h = (i, k) => ground.height[k * ground.cols + i];
+  return (h(ix, iz) * (1 - fx) + h(ix + 1, iz) * fx) * (1 - fz) + (h(ix, iz + 1) * (1 - fx) + h(ix + 1, iz + 1) * fx) * fz;
+}
+
+// Each solid cell of the height map acts like a small post.
+function pushOutOfSolidCells(pos, radius) {
+  if (!ground) return;
+  const { minX, minZ, cell, cols, rows, solid } = ground;
+  const post = cell * 0.6;
+  const reach = Math.ceil((radius + post) / cell);
+  const ci = Math.floor((pos.x - minX) / cell);
+  const ck = Math.floor((pos.z - minZ) / cell);
+  for (let k = Math.max(0, ck - reach); k <= Math.min(rows - 1, ck + reach); k++) {
+    for (let i = Math.max(0, ci - reach); i <= Math.min(cols - 1, ci + reach); i++) {
+      if (!solid[k * cols + i]) continue;
+      const dx = pos.x - (minX + (i + 0.5) * cell);
+      const dz = pos.z - (minZ + (k + 0.5) * cell);
+      const dist = Math.hypot(dx, dz);
+      const min = radius + post;
+      if (dist < min && dist > 1e-6) {
+        pos.x += (dx / dist) * (min - dist);
+        pos.z += (dz / dist) * (min - dist);
+      }
+    }
+  }
+}
+
 // Moves `pos` (a Vector3) out of any obstacle it overlaps, treating the player as a circle.
 export function pushOut(pos, radius) {
   keepOnWalkArea(pos, radius);
   for (let pass = 0; pass < 3; pass++) {
+    pushOutOfSolidCells(pos, radius);
     for (const c of circles) {
       const dx = pos.x - c.x;
       const dz = pos.z - c.z;

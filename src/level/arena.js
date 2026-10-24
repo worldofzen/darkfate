@@ -1,110 +1,27 @@
 // The boss arena, modelled on the ruined colosseums of Elden Ring:
 //
-//   - a round stone platform (the paving itself is made in ground.js) with a low stone rim,
+//   - the round stone platform (the Arena_center.glb model, with rune rings and rock spikes),
 //     standing on a great drum of stone that drops into a chasm
-//   - a stone bridge with balustrades from the fog gate across the chasm
-//   - a two-tier ring of arches around the chasm, broken at the top, with a gallery behind
-//   - stepped stands on the left and right, jagged rock spikes round the platform edge,
-//     fire bowls on pedestals, hanging banners, statues, grass and vines
+//   - a stone bridge (Arena_walkway.glb) from the fog gate across the chasm
+//   - a ring of two-storey arcaded walls (Dungeon_wall.glb sections) around the chasm, right
+//     up to the gate, with a second ring of them dropping into the chasm below
+//   - fire bowls on pedestals, grass and vines, and low fog rolling over the platform
 //
-// Big repeated pieces (arches, stands, balusters, grass) are merged or "instanced",
-// so the whole arena is only a few dozen draw calls.
+// Big repeated pieces (grass, vines) are "instanced", so the whole arena is only a few
+// dozen draw calls.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { ARENA, BRIDGE, GATE_Z } from './layout.js';
-import { wallStone, pillarStone, rockStone, dirtMeters, TEXTURE_METERS, worldScaleCylinderUVs, fluteUVs } from './materials.js';
-import { stoneBox } from './ruins.js';
+import { ARENA, BRIDGE, GATE_Z, GATE_TOP } from './layout.js';
+import { dirtMeters } from './materials.js';
 import { createBrazier } from './brazier.js';
-import { addBox, addCircle, cameraBlockers, setWalkArea } from './colliders.js';
+import { createGroundFog } from './groundFog.js';
+import { addCircle, setWalkArea, setGroundMap, groundHeight } from './colliders.js';
 
 const CZ = ARENA.z;
-const BAYS = 26; // arches around the ring
-const BAY_ANGLE = (Math.PI * 2) / BAYS;
-const LOWER_TOP = 7.2; // top of the lower arches
-const CORNICE = 0.7; // the ledge between the tiers
-const UPPER_TOP = 13;
 const deg = THREE.MathUtils.degToRad;
-
-// Is angle `a` (0 = toward the gate) inside one of the stand sectors?
-const STAND_SECTORS = [[deg(100), deg(160)], [deg(200), deg(260)]];
-const inStands = (a) => STAND_SECTORS.some(([s, e]) => a >= s && a <= e);
 
 // A point at `angle` around the arena, `radius` from its center.
 const around = (angle, radius, y = 0) => new THREE.Vector3(Math.sin(angle) * radius, y, CZ + Math.cos(angle) * radius);
-
-// --- Geometry helpers ---
-
-// A wall `width` wide and `height` tall with a round-topped opening cut through it.
-// The opening starts `openingBottom` above the wall's base. `topEdge` (optional) is a list of
-// heights across the top, for a broken, ruined top edge. Returns geometry centered on its depth.
-function archWall(width, height, depth, { opening, openingBottom, springAt, topEdge }) {
-  const w = width / 2;
-  const s = new THREE.Shape();
-  s.moveTo(-w, 0);
-  s.lineTo(w, 0);
-  if (topEdge) {
-    topEdge.forEach((h, i) => s.lineTo(w - (i / (topEdge.length - 1)) * width, h));
-  } else {
-    s.lineTo(w, height);
-    s.lineTo(-w, height);
-  }
-  s.closePath();
-  if (opening) {
-    const o = opening / 2;
-    const hole = new THREE.Path();
-    hole.moveTo(-o, openingBottom);
-    hole.lineTo(o, openingBottom);
-    hole.lineTo(o, openingBottom + springAt);
-    hole.absarc(0, openingBottom + springAt, o, 0, Math.PI, false);
-    hole.lineTo(-o, openingBottom);
-    s.holes.push(hole);
-  }
-  const g = new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: false, curveSegments: 12 });
-  g.translate(0, 0, -depth / 2);
-  // Extruded shapes measure texture coordinates in meters; our textures cover 2 m.
-  const uv = g.attributes.uv;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / TEXTURE_METERS.wall, uv.getY(i) / TEXTURE_METERS.wall);
-  return g;
-}
-
-// The raised stone band framing an arch (a U-shape following the opening), `band` meters wide.
-function archTrim(opening, springAt, band, depth) {
-  const o = opening / 2;
-  const r = o + band;
-  const s = new THREE.Shape();
-  s.moveTo(-r, 0);
-  s.lineTo(-r, springAt);
-  s.absarc(0, springAt, r, Math.PI, 0, true);
-  s.lineTo(r, 0);
-  s.lineTo(o, 0);
-  s.lineTo(o, springAt);
-  s.absarc(0, springAt, o, 0, Math.PI, false);
-  s.lineTo(-o, 0);
-  s.closePath();
-  const g = new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: false, curveSegments: 12 });
-  g.translate(0, 0, -depth / 2);
-  const uv = g.attributes.uv;
-  for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) / TEXTURE_METERS.wall, uv.getY(i) / TEXTURE_METERS.wall);
-  return g;
-}
-
-// Place a geometry at `angle` around the arena, `radius` out, at height `y`,
-// with its local +Z pointing outward and +X running along the ring.
-function onRing(geometry, angle, radius, y) {
-  const m = new THREE.Matrix4().makeRotationY(angle).setPosition(around(angle, radius, y));
-  return geometry.applyMatrix4(m);
-}
-
-function addMerged(level, parts, material, { shadows = true, blocksCamera = false } = {}) {
-  if (!parts.length) return null;
-  const mesh = new THREE.Mesh(mergeGeometries(parts.map((g) => (g.index ? g.toNonIndexed() : g))), material);
-  mesh.castShadow = shadows;
-  mesh.receiveShadow = true;
-  level.add(mesh);
-  if (blocksCamera) cameraBlockers.push(mesh);
-  return mesh;
-}
 
 // A flat piece of dirt from a 2D outline (texture measured in meters).
 function dirtFlat(shape, y) {
@@ -129,337 +46,284 @@ function buildGroundAndChasm(level) {
   outside.closePath();
   outside.holes.push(new THREE.Path().absarc(0, -CZ, ARENA.chasm, 0, Math.PI * 2, true));
   level.add(dirtFlat(outside, -0.04));
-  // Dirt under the platform paving, and the chasm floor far below.
-  level.add(dirtFlat(circleShape(0, CZ, ARENA.platform + 0.2), -0.04));
+  // The chasm floor far below.
   level.add(dirtFlat(circleShape(0, CZ, ARENA.chasm + 1), -ARENA.chasmDepth));
-
-  // The great stone drum the platform stands on.
-  const drum = new THREE.Mesh(
-    worldScaleCylinderUVs(new THREE.CylinderGeometry(ARENA.platform + 0.3, ARENA.platform + 1.2, ARENA.chasmDepth, 96, 1, true), ARENA.platform + 0.6, ARENA.chasmDepth),
-    wallStone
-  );
-  drum.position.set(0, -ARENA.chasmDepth / 2 - 0.05, CZ);
-  drum.receiveShadow = true;
-  level.add(drum);
 }
 
-function buildPlatformRim(level, rand) {
-  const parts = [];
-  const r = ARENA.platform + 0.05;
-  const count = 64;
-  for (let i = 0; i < count; i++) {
-    const a = ((i + 0.5) / count) * Math.PI * 2;
-    if (Math.min(a, Math.PI * 2 - a) < deg(8)) continue; // the bridge comes in here
-    if (rand() < 0.12) continue; // broken away
-    const length = (2 * Math.PI * r) / count - 0.06;
-    const h = 0.3 + rand() * 0.15;
-    parts.push(onRing(stoneBox(length, h, 0.7), a, r + 0.3, h / 2 - 0.02));
-  }
-  addMerged(level, parts, wallStone);
-}
+// --- The platform: the Arena_center.glb model ---
+// Measured on the model (in its own units): the walkable top reaches out to about 0.47 from
+// the middle, and the floor sits at about -0.0225. Scaled so that edge is the platform's edge,
+// the model is about 13 m thick: its underside becomes the drum dropping into the chasm.
+const PLATFORM_MODEL = { edge: 0.47, floorY: -0.0225 };
+const GROUND_CELL = 0.25; // height map resolution (m)
 
-// A little turned stone column for balustrades.
-function balusterGeometry() {
-  return new THREE.LatheGeometry(
-    [[0.07, 0], [0.09, 0.05], [0.05, 0.15], [0.09, 0.35], [0.1, 0.45], [0.06, 0.6], [0.08, 0.66], [0, 0.66]].map(([x, y]) => new THREE.Vector2(x, y)),
-    8
-  );
-}
-
-function buildBridge(level, rand) {
-  const halfW = BRIDGE.halfWidth;
-  const start = GATE_Z + 0.2;
-  const end = CZ + ARENA.platform - 0.3;
-  const length = start - end;
-  const mid = (start + end) / 2;
-
-  // The deck and the great arch holding it up, rising from the chasm floor.
-  const deck = new THREE.Mesh(stoneBox(halfW * 2 + 0.4, 0.8, length), wallStone);
-  deck.position.set(0, -0.45, mid);
-  deck.receiveShadow = true;
-  level.add(deck);
-  const support = archWall(length, ARENA.chasmDepth - 0.85, halfW * 2, { opening: length - 2.4, openingBottom: 0.02, springAt: 6 });
-  support.rotateY(Math.PI / 2);
-  support.translate(0, -ARENA.chasmDepth, mid);
-  addMerged(level, [support], wallStone);
-
-  // Balustrades: a plinth, little turned columns and a top rail on each side.
-  const baluster = balusterGeometry();
-  const spots = [];
-  const railParts = [];
-  for (const side of [-1, 1]) {
-    const x = side * (halfW + 0.05);
-    railParts.push(stoneBox(0.36, 0.22, length).translate(x, 0.11, mid));
-    railParts.push(stoneBox(0.3, 0.14, length).translate(x, 0.95, mid));
-    for (let z = end + 0.2; z < start - 0.1; z += 0.34) spots.push([x, 0.22, z]);
-    addBox(x, mid, 0.18, length / 2);
-  }
-  addMerged(level, railParts, wallStone);
-  const balusters = new THREE.InstancedMesh(baluster, wallStone, spots.length);
-  const m = new THREE.Matrix4();
-  spots.forEach(([x, y, z], i) => balusters.setMatrixAt(i, m.makeTranslation(x, y, z)));
-  balusters.castShadow = balusters.receiveShadow = true;
-  level.add(balusters);
-  return { start, end };
-}
-
-function buildColosseum(level, rand) {
-  const lower = [];
-  const upper = [];
-  const gallery = [];
-  const details = []; // arch trims and capitals
-  const columns = []; // fluted half-columns on the piers
-  const balusterSpots = [];
-  const depth = 1.5;
-  const inner = ARENA.chasm;
-  const bayWidth = 2 * (inner + depth) * Math.tan(BAY_ANGLE / 2) + 0.05;
-  const upperBays = [];
-
-  for (let i = 0; i < BAYS; i++) {
-    const a = i * BAY_ANGLE;
-    const gateBay = i === 0;
-    const nearGate = Math.min(a, Math.PI * 2 - a) < deg(13);
-
-    // Lower tier: from the chasm floor up, with an arch at platform level.
-    if (gateBay) {
-      // Under the gate: solid wall down into the chasm.
-      lower.push(onRing(archWall(bayWidth, ARENA.chasmDepth - 0.05, depth, {}), a, inner + depth / 2, -ARENA.chasmDepth));
-    } else {
-      lower.push(onRing(archWall(bayWidth, ARENA.chasmDepth + LOWER_TOP, depth, { opening: 4.2, openingBottom: ARENA.chasmDepth, springAt: 3.4 }), a, inner + depth / 2, -ARENA.chasmDepth));
-      details.push(onRing(archTrim(4.2, 3.4, 0.4, 0.3), a, inner - 0.1, 0));
-      // The ledge between the tiers, with a balustrade along its edge.
-      lower.push(onRing(stoneBox(bayWidth + 0.1, CORNICE, depth + 0.8), a, inner + depth / 2 - 0.2, LOWER_TOP + CORNICE / 2));
-      details.push(onRing(stoneBox(bayWidth + 0.1, 0.16, 0.34), a, inner - 0.42, LOWER_TOP + CORNICE + 0.08));
-      details.push(onRing(stoneBox(bayWidth + 0.1, 0.12, 0.3), a, inner - 0.42, LOWER_TOP + CORNICE + 0.86));
-      for (let k = 0; k < 18; k++) {
-        const along = (k / 18 - 0.5) * bayWidth + bayWidth / 36;
-        const spot = around(a, inner - 0.42, LOWER_TOP + CORNICE + 0.16);
-        const tangent = new THREE.Vector3(Math.cos(a), 0, -Math.sin(a));
-        if (rand() > 0.1) balusterSpots.push(spot.addScaledVector(tangent, along));
-      }
-      // A half-column on the pier between this arch and the next, with a square capital.
-      const pier = a + BAY_ANGLE / 2;
-      columns.push(onRing(fluteUVs(new THREE.CylinderGeometry(0.42, 0.48, LOWER_TOP - 0.6, 32), LOWER_TOP - 0.6), pier, inner - 0.05, (LOWER_TOP - 0.6) / 2));
-      details.push(onRing(stoneBox(1.15, 0.5, 0.7), pier, inner - 0.05, LOWER_TOP - 0.35));
-      details.push(onRing(stoneBox(1.2, 0.35, 0.75), pier, inner - 0.05, 0.17));
-    }
-
-    // The gallery behind the lower arches: a floor and a back wall (not where the corridor passes).
-    if (!nearGate) {
-      const galleryWidth = 2 * ARENA.gallery * Math.tan(BAY_ANGLE / 2) + 0.1;
-      gallery.push(onRing(stoneBox(galleryWidth, 0.4, ARENA.gallery - inner - depth + 0.2), a, (inner + depth + ARENA.gallery) / 2, -0.2));
-      gallery.push(onRing(archWall(galleryWidth + 0.6, LOWER_TOP + CORNICE, 1.2, { opening: 2.2, openingBottom: 0.02, springAt: 2.2 }), a, ARENA.gallery + 0.6, 0));
-    }
-
-    // Upper tier: smaller arches, with ruined, broken tops. Mostly gone above the stands.
-    if (gateBay) continue;
-    const gone = inStands(a) ? rand() < 0.7 : rand() < 0.12;
-    if (gone) continue;
-    const height = UPPER_TOP - LOWER_TOP - CORNICE;
-    if (rand() < 0.4) {
-      // Collapsed: just a broken stump of wall with a jagged top.
-      const topEdge = Array.from({ length: 8 }, () => height * (0.15 + rand() * 0.55));
-      upper.push(onRing(archWall(bayWidth, height, depth - 0.2, { topEdge }), a, inner + depth / 2, LOWER_TOP + CORNICE));
-      continue;
-    }
-    upper.push(onRing(archWall(bayWidth, height, depth - 0.2, { opening: 3.0, openingBottom: 0.9, springAt: 2.4 }), a, inner + depth / 2, LOWER_TOP + CORNICE));
-    details.push(onRing(archTrim(3.0, 2.4, 0.32, 0.26), a, inner - 0.05, LOWER_TOP + CORNICE + 0.9));
-    upperBays.push(a);
-  }
-  addMerged(level, lower, wallStone, { blocksCamera: true });
-  addMerged(level, upper, wallStone, { blocksCamera: true });
-  addMerged(level, gallery, wallStone);
-  addMerged(level, details, wallStone);
-  addMerged(level, columns, pillarStone);
-  const balusters = new THREE.InstancedMesh(balusterGeometry(), wallStone, balusterSpots.length);
-  const m = new THREE.Matrix4();
-  balusterSpots.forEach((p, i) => balusters.setMatrixAt(i, m.makeTranslation(p.x, p.y, p.z)));
-  balusters.castShadow = balusters.receiveShadow = true;
-  level.add(balusters);
-  return { upperBays };
-}
-
-function buildStands(level, rand) {
-  const block = stoneBox(1.25, 0.9, 0.78);
-  const spots = [];
-  for (const [startA, endA] of STAND_SECTORS) {
-    for (let row = 0; row < 14; row++) {
-      const r = ARENA.gallery + 1.2 + row * 0.75;
-      const y = LOWER_TOP + CORNICE + row * 0.45 - 0.45;
-      const count = Math.floor(((endA - startA) * r) / 1.28);
-      for (let k = 0; k < count; k++) {
-        if (rand() < 0.07) continue; // missing stone
-        const a = startA + ((k + 0.5) / count) * (endA - startA);
-        const fallen = rand() < 0.05;
-        spots.push({ a, r, y: y - (fallen ? 0.25 + rand() * 0.3 : 0), tilt: fallen ? (rand() - 0.5) * 0.5 : 0 });
-      }
-    }
-  }
-  const stands = new THREE.InstancedMesh(block, wallStone, spots.length);
-  const m = new THREE.Matrix4();
-  const q = new THREE.Quaternion();
-  const e = new THREE.Euler();
-  spots.forEach(({ a, r, y, tilt }, i) => {
-    q.setFromEuler(e.set(tilt, a, tilt * 0.5));
-    m.compose(around(a, r, y), q, new THREE.Vector3(1, 1, 1));
-    stands.setMatrixAt(i, m);
+function buildPlatform(level, loadModel) {
+  return loadModel('models/Arena_center.glb').then((platform) => {
+    const scale = ARENA.platform / PLATFORM_MODEL.edge;
+    platform.scale.setScalar(scale);
+    platform.position.set(0, -PLATFORM_MODEL.floorY * scale + 0.12, CZ); // a little raised: level with the bridge at the edge
+    level.add(platform);
+    platform.updateMatrixWorld(true);
+    return platform;
   });
-  stands.castShadow = stands.receiveShadow = true;
-  level.add(stands);
 }
 
-// Jagged rock spikes breaking through round the platform edge.
-function buildRockSpikes(level, rand) {
-  const parts = [];
-  for (const angleDeg of [48, 118, 196, 252, 318]) {
-    const a = deg(angleDeg);
-    const spikes = 5 + Math.floor(rand() * 4);
-    for (let s = 0; s < spikes; s++) {
-      const height = 1.2 + rand() * rand() * 4.5;
-      const radius = 0.35 + rand() * 0.6;
-      const g = new THREE.ConeGeometry(radius, height, 5, 4);
-      const pos = g.attributes.position;
-      for (let v = 0; v < pos.count; v++) {
-        if (pos.getY(v) > height / 2 - 0.01) continue; // keep the tip sharp
-        pos.setXYZ(v, pos.getX(v) * (0.7 + rand() * 0.6), pos.getY(v) + (rand() - 0.5) * 0.2, pos.getZ(v) * (0.7 + rand() * 0.6));
+// A height map of the platform's and walkway's top surfaces: for every 25 cm cell, the height of
+// the highest triangle above it. Cells far above the floor (rock spikes, parapets) or with
+// nothing there (broken edges) are marked solid, so you can't walk through them or fall off.
+function groundMapFrom(models) {
+  const half = ARENA.platform + 1.5;
+  const cell = GROUND_CELL;
+  const cols = Math.ceil((2 * half) / cell);
+  const minX = -half;
+  const minZ = CZ - half;
+  const rows = Math.ceil((GATE_Z + 1 - minZ) / cell); // up to the gate, to cover the walkway
+  const top = new Float32Array(cols * rows).fill(-Infinity);
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  for (const model of models) model.traverse((o) => {
+    if (!o.isMesh) return;
+    const pos = o.geometry.attributes.position;
+    const index = o.geometry.index;
+    const count = index ? index.count : pos.count;
+    const vertex = (v, n) => v.fromBufferAttribute(pos, index ? index.getX(n) : n).applyMatrix4(o.matrixWorld);
+    for (let t = 0; t < count; t += 3) {
+      vertex(a, t);
+      vertex(b, t + 1);
+      vertex(c, t + 2);
+      const det = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
+      if (Math.abs(det) < 1e-9) continue; // a vertical face
+      const i0 = Math.max(0, Math.ceil((Math.min(a.x, b.x, c.x) - minX) / cell - 0.5));
+      const i1 = Math.min(cols - 1, Math.floor((Math.max(a.x, b.x, c.x) - minX) / cell - 0.5));
+      const k0 = Math.max(0, Math.ceil((Math.min(a.z, b.z, c.z) - minZ) / cell - 0.5));
+      const k1 = Math.min(rows - 1, Math.floor((Math.max(a.z, b.z, c.z) - minZ) / cell - 0.5));
+      for (let k = k0; k <= k1; k++) {
+        const pz = minZ + (k + 0.5) * cell;
+        for (let i = i0; i <= i1; i++) {
+          const px = minX + (i + 0.5) * cell;
+          const l1 = ((b.z - c.z) * (px - c.x) + (c.x - b.x) * (pz - c.z)) / det;
+          const l2 = ((c.z - a.z) * (px - c.x) + (a.x - c.x) * (pz - c.z)) / det;
+          const l3 = 1 - l1 - l2;
+          if (l1 < 0 || l2 < 0 || l3 < 0) continue;
+          const y = l1 * a.y + l2 * b.y + l3 * c.y;
+          if (y > top[k * cols + i]) top[k * cols + i] = y;
+        }
       }
-      g.computeVertexNormals();
-      g.rotateZ((rand() - 0.5) * 0.5);
-      g.rotateX(-0.15 - rand() * 0.35); // lean outward over the chasm
-      g.rotateY(a + (rand() - 0.5) * 0.8);
-      const spot = around(a + (rand() - 0.5) * 0.18, ARENA.platform + 0.3 + rand() * 1.4, height / 2 - 0.4);
-      g.translate(spot.x, spot.y, spot.z);
-      parts.push(g);
+    }
+  });
+
+  const SPIKE = 0.6; // higher than this above the floor: a rock you bump into
+  const HOLE = -1.5; // lower than this (or nothing there): a gap you can't step into
+  const walkable = (y) => y > HOLE && y < SPIKE;
+  const height = new Float32Array(cols * rows);
+  const solid = new Uint8Array(cols * rows);
+  const onWalkway = (x, z) => Math.abs(x) < BRIDGE.halfWidth + 0.6 && z > CZ + ARENA.platform - 3 && z < GATE_Z;
+  for (let k = 0; k < rows; k++) {
+    for (let i = 0; i < cols; i++) {
+      const j = k * cols + i;
+      // The local floor level: the average of the walkable cells nearby (about 1.25 m across),
+      // so narrow cracks don't swallow your feet.
+      let sum = 0;
+      let n = 0;
+      for (let dk = -2; dk <= 2; dk++) {
+        for (let di = -2; di <= 2; di++) {
+          const kk = k + dk;
+          const ii = i + di;
+          if (kk < 0 || ii < 0 || kk >= rows || ii >= cols) continue;
+          const y = top[kk * cols + ii];
+          if (walkable(y)) {
+            sum += y;
+            n++;
+          }
+        }
+      }
+      const local = n ? sum / n : 0;
+      const raw = top[j];
+      height[j] = THREE.MathUtils.clamp(walkable(raw) ? Math.max(raw, local - 0.12) : local, -0.3, SPIKE); // wide cracks: sink a little, not into them
+      const x = minX + (i + 0.5) * cell;
+      const z = minZ + (k + 0.5) * cell;
+      if (!walkable(raw) && (Math.hypot(x, z - CZ) < ARENA.platform + 0.5 || onWalkway(x, z))) solid[j] = 1;
     }
   }
-  addMerged(level, parts, rockStone);
+  return { minX, minZ, cell, cols, rows, height, solid };
 }
 
-function buildBraziers(level, glow, animated) {
+// --- The ring of arcaded walls: Dungeon_wall.glb sections ---
+// Each section is curved like a slice of a colosseum (its two halves meet at an angle), with
+// two storeys of arches on its inner (-Z) side, spanning about 46° when scaled to
+// suit its radius (about 31x: some 30 m wide and 24 m tall).
+// Above the platform they run right up to both sides of the gate; below it, a second ring of
+// them (a lighter copy of the model, as it's mostly lost in the mist) drops into the chasm.
+const WALL_MODEL = { innerFaceZ: -0.043, bottomY: -0.39, width: 0.98, height: 0.78, depth: 0.366 }; // measured on the model
+const RING_SCALE = ((21 * (ARENA.chasm + 0.6)) / 26.6) * 1.04; // 4% over, so neighbours overlap at the seams
+const GATE_SECTOR = deg(7.2); // half the gate's width, seen from the middle of the arena
+
+function buildWallRing(level, wallModel, lowWallModel) {
+  const sections = 8; // each spans about 46°: eight leave a little overlap at the seams
+  const span = (Math.PI * 2 - 2 * GATE_SECTOR) / sections;
+  const radius = ARENA.chasm + 0.6 - WALL_MODEL.innerFaceZ * RING_SCALE;
+  const height = WALL_MODEL.height * RING_SCALE;
+  const place = (source, a, bottom, shadows) => {
+    const section = source.clone();
+    section.scale.setScalar(RING_SCALE);
+    section.position.copy(around(a, radius, bottom - WALL_MODEL.bottomY * RING_SCALE));
+    section.rotation.y = a; // arches (-Z) facing the middle of the arena
+    section.traverse((o) => o.isMesh && (o.castShadow = shadows));
+    level.add(section);
+  };
+  wallModel.then((wall) => {
+    for (let k = 0; k < sections; k++) place(wall, GATE_SECTOR + span * (k + 0.5), -1, true);
+  });
+  // Above the gate, which is only half as tall: two smaller storeys stacked up to the top, on
+  // top of the gate. The model is arched on one face and curves back like a dome behind it, so
+  // each storey is two thin slices back to back: arches toward the arena and toward the corridor.
+  lowWallModel.then((wall) => {
+    const width = 2 * radius * Math.sin(GATE_SECTOR) + 1.2;
+    const bottom = GATE_TOP - 0.4;
+    const each = (height - 1 - bottom) / 2;
+    const slice = 1.2; // each slice's depth (m): thin, which also flattens the model's curve
+    for (let k = 0; k < 2; k++) {
+      for (const side of [-1, 1]) {
+        const piece = wall.clone();
+        piece.scale.set(width / WALL_MODEL.width, each / WALL_MODEL.height, slice / WALL_MODEL.depth);
+        piece.rotation.y = side > 0 ? Math.PI : 0; // arches (-Z) facing out on this side
+        piece.position.set(0, bottom + each * k - WALL_MODEL.bottomY * piece.scale.y, GATE_Z + side * slice / 2);
+        level.add(piece);
+      }
+    }
+  });
+  // All the way round below, under the gate too; turned half a section so the seams don't line up.
+  lowWallModel.then((wall) => {
+    for (let k = 0; k < 9; k++) place(wall, ((k + 0.5) / 9) * Math.PI * 2, -1.3 - height, false); // nine: no gap left round the full circle
+  });
+}
+
+// --- The walkway: Arena_walkway.glb, a long stone bridge from the veil to the platform ---
+// Measured on the model: it runs along its X axis (0.98 long), its paved deck sits at
+// y = 0.003 between two low parapet walls, and it's about 0.17 wide. At 24x it is a 23.5 m
+// bridge with a 3.1 m wide deck and parapets about 0.8 m tall. It starts in the gateway and
+// reaches 2 m onto the platform. Underneath, a dungeon wall section stretched along it holds
+// it up from the chasm floor like an aqueduct (squashed thin, which straightens its curve).
+const WALKWAY = { scale: 24, halfLength: 0.49, deckY: 0.003, halfWidth: 0.085 };
+
+function buildBridge(level, loadModel, lowWallModel) {
+  const start = GATE_Z + 0.5;
+  const length = WALKWAY.halfLength * 2 * WALKWAY.scale;
+  const mid = start - length / 2;
+  const end = CZ + ARENA.platform; // where it reaches the platform's edge
+
+  // The model has arches on one face only, so two thin copies stand back to back.
+  lowWallModel.then((wall) => {
+    const deck = WALKWAY.halfWidth * 2 * WALKWAY.scale;
+    const height = ARENA.chasmDepth + 0.5;
+    for (const side of [-1, 1]) {
+      const support = wall.clone();
+      support.scale.set((start - end + 2) / WALL_MODEL.width, height / WALL_MODEL.height, (deck / 2 - 0.15) / WALL_MODEL.depth);
+      support.rotation.y = -side * (Math.PI / 2); // arches (-Z) facing out to this side
+      support.position.set(side * (deck / 4 - 0.05), -0.4 - height / 2, (start + end) / 2);
+      support.traverse((o) => o.isMesh && (o.castShadow = false));
+      level.add(support);
+    }
+  });
+
+  const ready = loadModel('models/Arena_walkway.glb').then((walkway) => {
+    walkway.scale.setScalar(WALKWAY.scale);
+    walkway.rotation.y = Math.PI / 2; // its length (X) runs from the gate toward the arena (-Z)
+    walkway.position.set(0, -WALKWAY.deckY * WALKWAY.scale, mid);
+    level.add(walkway);
+    walkway.updateMatrixWorld(true);
+    return walkway;
+  });
+  return { start, end, ready };
+}
+
+// Eight big stone fire bowls (Dungeon_lamp.glb) round the platform, standing on the real floor.
+function buildBraziers(level, glow, animated, loadModel) {
   const lit = new Set([0, 3, 4, 7]); // real lights are costly: only some bowls light their surroundings
+  const lampModel = loadModel('models/Dungeon_lamp.glb');
   for (let i = 0; i < 8; i++) {
     const a = deg(22.5 + i * 45);
-    const spot = around(a, ARENA.platform - 1.7);
-    const pedestal = new THREE.Mesh(stoneBox(0.8, 0.8, 0.8), wallStone);
-    pedestal.position.set(spot.x, 0.4, spot.z);
-    pedestal.castShadow = pedestal.receiveShadow = true;
-    level.add(pedestal);
-    const b = createBrazier(glow, { light: lit.has(i) });
-    b.position.set(spot.x, 0.8, spot.z);
+    const spot = around(a, ARENA.platform - 4.5);
+    spot.y = groundHeight(spot.x, spot.z) - 0.05; // sunk a touch into the uneven floor
+    const b = createBrazier(glow, { model: lampModel, height: 2.2, light: lit.has(i) });
+    b.position.copy(spot);
     level.add(b);
     animated.push(b);
-    addCircle(spot.x, spot.z, 0.6);
+    addCircle(spot.x, spot.z, 0.85);
   }
 }
 
-// Deep blue banners with a gold crest, hanging from the ledge and swaying a little.
-function bannerTexture() {
-  const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 1024;
-  const ctx = c.getContext('2d');
-  const g = ctx.createLinearGradient(0, 0, 0, 1024);
-  g.addColorStop(0, '#2f4590');
-  g.addColorStop(1, '#1a2858');
-  ctx.fillStyle = g;
-  // Body with a ragged, torn bottom edge.
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(256, 0);
-  let x = 256;
-  ctx.lineTo(256, 860);
-  while (x > 0) {
-    x -= 12 + Math.random() * 20;
-    ctx.lineTo(Math.max(0, x), 860 + Math.random() * 150);
-  }
-  ctx.lineTo(0, 860);
-  ctx.closePath();
-  ctx.fill();
-  // Gold trim and a simple crest.
-  ctx.strokeStyle = '#b8964a';
-  ctx.lineWidth = 6;
-  ctx.strokeRect(18, 18, 220, 820);
-  ctx.fillStyle = '#c9a65a';
-  ctx.save();
-  ctx.translate(128, 330);
-  ctx.beginPath();
-  ctx.moveTo(0, -120);
-  ctx.bezierCurveTo(40, -60, 40, -20, 0, 20);
-  ctx.bezierCurveTo(-40, -20, -40, -60, 0, -120);
-  ctx.fill();
-  for (const side of [-1, 1]) {
-    ctx.beginPath();
-    ctx.moveTo(0, 10);
-    ctx.bezierCurveTo(side * 90, -10, side * 100, -80, side * 60, -100);
-    ctx.bezierCurveTo(side * 70, -60, side * 50, -20, 0, 30);
-    ctx.fill();
-  }
-  ctx.fillRect(-60, 40, 120, 14);
-  ctx.beginPath();
-  ctx.moveTo(-14, 60);
-  ctx.lineTo(14, 60);
-  ctx.lineTo(0, 150);
-  ctx.fill();
-  ctx.restore();
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  return tex;
-}
-
-function buildBanners(level, animated) {
-  const material = new THREE.MeshStandardMaterial({ map: bannerTexture(), side: THREE.DoubleSide, alphaTest: 0.5, roughness: 0.92 });
-  const time = { value: 0 };
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.time = time;
-    shader.vertexShader = 'uniform float time;\n' + shader.vertexShader.replace(
-      '#include <begin_vertex>',
-      `#include <begin_vertex>
-       float sway = (1.0 - uv.y);
-       transformed.z += sin(time * 1.3 + position.y * 0.9 + modelMatrix[3].x) * 0.12 * sway * sway;
-       transformed.x += sin(time * 0.9 + position.y * 1.7) * 0.04 * sway;`
-    );
-  };
-  const geometry = new THREE.PlaneGeometry(1.5, 5.4, 1, 12);
-  geometry.translate(0, -2.7, 0); // hang from the top edge
-  for (const angleDeg of [40, 75, 105, 140, 220, 255, 285, 320]) {
-    // Between two arches, on the pier.
-    const a = Math.round(deg(angleDeg) / BAY_ANGLE) * BAY_ANGLE + BAY_ANGLE / 2;
-    const banner = new THREE.Mesh(geometry, material);
-    banner.position.copy(around(a, ARENA.chasm - 0.08, LOWER_TOP - 0.05));
-    banner.rotation.y = a + Math.PI; // facing the middle of the arena
-    banner.castShadow = true;
-    level.add(banner);
-  }
-  const holder = new THREE.Object3D();
-  holder.userData.update = (t) => (time.value = t);
-  animated.push(holder);
-}
-
-// Grass: tufts of blades made from two crossed cards, swaying in the wind.
+// Grass: tufts of tapered, curving blades on three crossed cards, swaying in the wind.
+// The colors are muted (olive, straw, dead brown) to sit in the gloom instead of glowing green.
 function grassTexture() {
+  const size = 512;
   const c = document.createElement('canvas');
-  c.width = c.height = 256;
+  c.width = c.height = size;
   const ctx = c.getContext('2d');
-  for (let i = 0; i < 46; i++) {
-    const x = 30 + Math.random() * 196;
-    const h = 120 + Math.random() * 130;
-    const lean = (Math.random() - 0.5) * 90;
-    const shade = 85 + Math.random() * 70;
-    ctx.strokeStyle = `rgb(${shade * 0.78}, ${shade}, ${shade * 0.6})`;
-    ctx.lineWidth = 2 + Math.random() * 3;
+  const tips = [
+    [118, 134, 64], // olive
+    [146, 150, 82], // pale olive
+    [164, 146, 90], // straw
+    [118, 96, 60], // dead brown
+  ];
+  const blade = (x, h, width, lean, tip, dim) => {
+    const top = size - h;
+    const g = ctx.createLinearGradient(0, size, 0, top);
+    g.addColorStop(0, `rgb(${40 * dim}, ${46 * dim}, ${24 * dim})`);
+    g.addColorStop(0.45, `rgb(${78 * dim}, ${90 * dim}, ${44 * dim})`);
+    g.addColorStop(1, `rgb(${tip[0] * dim}, ${tip[1] * dim}, ${tip[2] * dim})`);
+    ctx.fillStyle = g;
+    // A narrow leaf: wide at the root, curving over to a sharp point.
+    const tipX = x + lean;
+    const midX = x + lean * 0.25;
     ctx.beginPath();
-    ctx.moveTo(x, 256);
-    ctx.quadraticCurveTo(x + lean * 0.3, 256 - h * 0.6, x + lean, 256 - h);
+    ctx.moveTo(x - width, size);
+    ctx.quadraticCurveTo(midX - width * 0.8, size - h * 0.55, tipX, top);
+    ctx.quadraticCurveTo(midX + width * 0.8, size - h * 0.55, x + width, size);
+    ctx.closePath();
+    ctx.fill();
+  };
+  // Back blades first (darker), then the front ones over them.
+  for (let layer = 0; layer < 2; layer++) {
+    const count = layer ? 34 : 26;
+    for (let i = 0; i < count; i++) {
+      const fromCenter = (Math.random() - 0.5) * (Math.random() * 0.5 + 0.5); // bunched in the middle
+      const x = size / 2 + fromCenter * size * 0.75;
+      const h = size * (0.35 + Math.random() * 0.6) * (1 - Math.abs(fromCenter) * 0.9);
+      const lean = fromCenter * size * 0.5 + (Math.random() - 0.5) * 70; // splay outward
+      const tip = Math.random() < 0.18 ? tips[3] : tips[Math.floor(Math.random() * 3)];
+      blade(x, h, 5 + Math.random() * 6, lean, tip, layer ? 0.9 + Math.random() * 0.25 : 0.65 + Math.random() * 0.2);
+    }
+  }
+  // A few seed heads on tall stalks.
+  for (let i = 0; i < 3; i++) {
+    const x = size / 2 + (Math.random() - 0.5) * 140;
+    const h = size * (0.82 + Math.random() * 0.15);
+    const lean = (Math.random() - 0.5) * 60;
+    ctx.strokeStyle = 'rgb(86, 78, 48)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x, size);
+    ctx.quadraticCurveTo(x + lean * 0.3, size - h * 0.6, x + lean, size - h);
     ctx.stroke();
+    ctx.fillStyle = 'rgb(138, 120, 76)';
+    for (let k = 0; k < 7; k++) {
+      ctx.beginPath();
+      ctx.ellipse(x + lean + (Math.random() - 0.5) * 6, size - h + k * 7, 4, 7, lean * 0.004, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
   return tex;
 }
 
-function swayingMaterial(map, time, strength) {
-  const material = new THREE.MeshStandardMaterial({ map, side: THREE.DoubleSide, alphaTest: 0.4, roughness: 0.95 });
+// `softNormals`: light the blades with the normals the mesh gives (tilted up), the same from
+// both sides, so a tuft shades like a soft clump instead of flat cards flipping light to dark.
+function swayingMaterial(map, time, strength, { softNormals = false, vertexColors = false, alphaTest = 0.4 } = {}) {
+  const material = new THREE.MeshStandardMaterial({ map, side: THREE.DoubleSide, alphaTest, roughness: 0.95, vertexColors });
   material.onBeforeCompile = (shader) => {
     shader.uniforms.time = time;
     shader.vertexShader = 'uniform float time;\n' + shader.vertexShader.replace(
@@ -467,43 +331,95 @@ function swayingMaterial(map, time, strength) {
       `#include <begin_vertex>
        vec3 base = instanceMatrix[3].xyz;
        float bend = uv.y * uv.y * ${strength.toFixed(3)};
-       transformed.x += sin(time * 1.6 + base.x * 0.7 + base.z * 0.5) * bend;
-       transformed.z += cos(time * 1.3 + base.z * 0.6) * bend * 0.6;`
+       float gust = 0.6 + 0.8 * (0.5 + 0.5 * sin(time * 0.45 + base.x * 0.12 + base.z * 0.09));
+       float flutter = sin(time * 4.3 + base.x * 3.1 + base.z * 2.3 + uv.x * 2.0) * 0.15;
+       transformed.x += (sin(time * 1.6 + base.x * 0.7 + base.z * 0.5) + flutter) * bend * gust;
+       transformed.z += (cos(time * 1.3 + base.z * 0.6) + flutter) * bend * gust * 0.6;`
     );
+    if (softNormals) {
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <normal_fragment_begin>',
+        `#include <normal_fragment_begin>
+         normal = normalize(vNormal);`
+      );
+    }
   };
   return material;
 }
 
+// One tuft: three cards at 60°, cut into rows so they curve when they bend. The vertex
+// colors darken the roots (where the blades crowd together and the light can't reach).
+function tuftGeometry() {
+  const cards = [0, 1, 2].map((i) => {
+    const card = new THREE.PlaneGeometry(1, 1, 1, 4);
+    card.translate(0, 0.5, 0);
+    card.rotateY((i * Math.PI) / 3);
+    return card;
+  });
+  const tuft = mergeGeometries(cards);
+  const uv = tuft.attributes.uv;
+  const normal = tuft.attributes.normal;
+  const colors = new Float32Array(uv.count * 3);
+  const n = new THREE.Vector3();
+  for (let i = 0; i < uv.count; i++) {
+    const shade = 0.5 + 0.5 * Math.pow(uv.getY(i), 0.6);
+    colors.set([shade, shade, shade], i * 3);
+    n.fromBufferAttribute(normal, i).multiplyScalar(0.3).add(new THREE.Vector3(0, 1, 0)).normalize();
+    normal.setXYZ(i, n.x, n.y, n.z);
+  }
+  tuft.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return tuft;
+}
+
 function buildGrass(level, rand, animated, isPaved) {
-  const card = new THREE.PlaneGeometry(1, 1);
-  card.translate(0, 0.5, 0);
-  const tuft = mergeGeometries([card.clone(), card.clone().rotateY(Math.PI / 2)]);
   const time = { value: 0 };
   const spots = [];
-  // Round the platform edge and in the gallery.
-  for (let i = 0; i < 450; i++) {
-    const a = rand() * Math.PI * 2;
-    if (Math.min(a, Math.PI * 2 - a) < deg(9)) continue;
-    spots.push(around(a, ARENA.platform - 0.4 - rand() * rand() * 2.5));
-  }
-  for (let i = 0; i < 260; i++) spots.push(around(rand() * Math.PI * 2, ARENA.chasm + 1.8 + rand() * 2));
-  // Pushing up through cracks in the platform paving.
-  for (let i = 0; i < 50; i++) spots.push(around(rand() * Math.PI * 2, 2 + rand() * (ARENA.platform - 4)));
-  // Along the walls of the courtyard and corridor.
-  for (let i = 0; i < 900; i++) {
-    const x = (rand() - 0.5) * 15;
+  const braziers = [[-5.5, -4.5], [5.5, -4.5], [-3, -11.5], [3, -21.5]];
+  const clear = (x, z) => isPaved(x, z) && braziers.every(([bx, bz]) => Math.hypot(x - bx, z - bz) > 0.8);
+  const clump = (cx, cz, count, spread, scale) => {
+    for (let k = 0; k < count; k++) {
+      const r = spread * Math.sqrt(rand());
+      const a = rand() * Math.PI * 2;
+      const x = cx + Math.cos(a) * r;
+      const z = cz + Math.sin(a) * r;
+      // Bigger in the middle of a clump, smaller round its edge.
+      if (clear(x, z)) spots.push({ x, z, s: scale * (1 - (0.5 * r) / spread) * (0.7 + rand() * 0.5) });
+    }
+  };
+  // Clumps growing out from the foot of the walls of the courtyard and corridor.
+  for (let i = 0; i < 110; i++) {
     const z = 8.5 - rand() * 34;
     const edge = z > -6.5 ? 7.5 : 5;
-    const nearWall = Math.abs(Math.abs(x) - edge) < 1.2 || z > 6.5;
-    if (nearWall && isPaved(x, z)) spots.push(new THREE.Vector3(x, 0, z));
+    const side = rand() < 0.5 ? -1 : 1;
+    const backWall = z > 6.5 && rand() < 0.5;
+    const x = backWall ? (rand() - 0.5) * 14 : side * (edge - 0.15 - rand() * rand() * 1.1);
+    const zz = backWall ? 8.35 - rand() * rand() * 1.1 : z;
+    clump(x, zz, 3 + Math.floor(rand() * 6), 0.25 + rand() * 0.35, 0.45 + rand() * 0.45);
   }
-  const grass = new THREE.InstancedMesh(tuft, swayingMaterial(grassTexture(), time, 0.12), spots.length);
+  // Around the feet of the pillars.
+  for (const [px, pz] of [[-5.5, 6.5], [5.5, 6.5], ...[-9, -14, -19, -24].flatMap((z) => [[-3.75, z], [3.75, z]])]) {
+    if (rand() < 0.75) clump(px + (rand() - 0.5) * 0.8, pz + (rand() - 0.5) * 0.8, 4 + Math.floor(rand() * 4), 0.4, 0.5);
+  }
+  // And a few small sprigs out in the open, poking through the cracks between the flagstones.
+  for (let i = 0; i < 70; i++) {
+    const x = (rand() - 0.5) * 14;
+    const z = 8 - rand() * 33;
+    if (clear(x, z)) spots.push({ x, z, s: 0.18 + rand() * 0.2 });
+  }
+
+  const grass = new THREE.InstancedMesh(
+    tuftGeometry(),
+    swayingMaterial(grassTexture(), time, 0.14, { softNormals: true, vertexColors: true, alphaTest: 0.5 }),
+    spots.length,
+  );
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
-  spots.forEach((p, i) => {
-    const s = 0.35 + rand() * 0.6;
-    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rand() * Math.PI);
-    m.compose(p.setY(-0.02), q, new THREE.Vector3(s * 1.1, s, s * 1.1));
+  const tilt = new THREE.Euler();
+  spots.forEach(({ x, z, s }, i) => {
+    tilt.set((rand() - 0.5) * 0.25, rand() * Math.PI * 2, (rand() - 0.5) * 0.25); // not all bolt upright
+    q.setFromEuler(tilt);
+    const wide = 1 + rand() * 0.4;
+    m.compose(new THREE.Vector3(x, -0.03, z), q, new THREE.Vector3(s * wide, s * (0.85 + rand() * 0.3), s * wide));
     grass.setMatrixAt(i, m);
   });
   grass.receiveShadow = true;
@@ -514,6 +430,7 @@ function buildGrass(level, rand, animated, isPaved) {
 }
 
 // Hanging vines: long strands of dark leaves draped down the arches.
+const VINE_LEDGES = [11.2, 22.5]; // heights of the wall ring's ledges (m)
 function vineTexture() {
   const c = document.createElement('canvas');
   c.width = 128;
@@ -537,7 +454,7 @@ function vineTexture() {
   return tex;
 }
 
-function buildVines(level, rand, animated, upperBays) {
+function buildVines(level, rand, animated) {
   const card = new THREE.PlaneGeometry(1, 1);
   card.translate(0, -0.5, 0); // hangs down from its top edge
   const time = { value: 0 };
@@ -546,13 +463,13 @@ function buildVines(level, rand, animated, upperBays) {
   const q = new THREE.Quaternion();
   for (let i = 0; i < 150; i++) {
     let a = rand() * Math.PI * 2;
-    if (Math.min(a, Math.PI * 2 - a) < deg(10)) a += deg(20);
-    const high = rand() < 0.4 && upperBays.length;
-    if (high) a = upperBays[Math.floor(rand() * upperBays.length)] + (rand() - 0.5) * BAY_ANGLE;
-    const top = high ? UPPER_TOP - 1 - rand() * 2 : LOWER_TOP + CORNICE;
-    const length = 1.5 + rand() * (high ? 3 : 5);
+    if (Math.min(a, Math.PI * 2 - a) < GATE_SECTOR + deg(2)) a += GATE_SECTOR * 2 + deg(4); // not over the gate
+    // Draped from the ledges of the wall ring: the one between its storeys, and its top.
+    const high = rand() < 0.35;
+    const top = high ? VINE_LEDGES[1] - rand() * 1.5 : VINE_LEDGES[0] - rand() * 0.5;
+    const length = 2 + rand() * (high ? 5 : 7);
     q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), a + Math.PI);
-    m.compose(around(a, ARENA.chasm - 0.12 - rand() * 0.1, top), q, new THREE.Vector3(0.7 + rand() * 0.8, length, 1));
+    m.compose(around(a, ARENA.chasm + 0.55 + rand() * 0.15, top), q, new THREE.Vector3(0.9 + rand() * 1.1, length, 1));
     vines.setMatrixAt(i, m);
   }
   level.add(vines);
@@ -561,50 +478,28 @@ function buildVines(level, rand, animated, upperBays) {
   animated.push(holder);
 }
 
-export function buildArena(level, rand, glow, animated, isPaved) {
+export function buildArena(level, rand, glow, animated, isPaved, loadModel) {
   buildGroundAndChasm(level);
-  buildPlatformRim(level, rand);
-  const bridge = buildBridge(level, rand);
-  const { upperBays } = buildColosseum(level, rand);
-  buildStands(level, rand);
-  buildRockSpikes(level, rand);
-  buildBraziers(level, glow, animated);
-  buildBanners(level, animated);
+  const wallModel = loadModel('models/Dungeon_wall.glb');
+  const lowWallModel = loadModel('models/Dungeon_wall_low.glb');
+  const bridge = buildBridge(level, loadModel, lowWallModel);
+  // Once the platform and walkway have loaded: their height map, then the fire bowls on the real floor.
+  Promise.all([buildPlatform(level, loadModel), bridge.ready]).then((models) => {
+    setGroundMap(groundMapFrom(models));
+    buildBraziers(level, glow, animated, loadModel);
+  });
+  buildWallRing(level, wallModel, lowWallModel);
   buildGrass(level, rand, animated, isPaved);
-  buildVines(level, rand, animated, upperBays);
+  buildVines(level, rand, animated);
+
+  // Low fog rolling over the platform, spilling a little past its edge.
+  const fog = createGroundFog(new THREE.Vector3(0, 0.1, CZ), ARENA.platform + 6);
+  level.add(fog);
+  animated.push(fog);
 
   // You can only stand on the platform and the bridge (the rest is a long drop).
   setWalkArea((x, z) => z < GATE_Z - 0.2, [
     { x: 0, z: CZ, radius: ARENA.platform },
     { minX: -BRIDGE.halfWidth, maxX: BRIDGE.halfWidth, minZ: bridge.end - 1, maxZ: GATE_Z + 0.5 },
   ]);
-
-  // Statues of knights standing in some of the upper arches (added once the knight model has loaded).
-  const statueBays = upperBays.filter((a) => !inStands(a) && Math.min(a, Math.PI * 2 - a) > deg(40));
-  return {
-    addStatues(knightModel, idleClip) {
-      const picks = [deg(180), deg(80), deg(280), deg(165), deg(195)]
-        .map((want) => statueBays.reduce((best, a) => (Math.abs(a - want) < Math.abs(best - want) ? a : best), statueBays[0]))
-        .filter((a, i, all) => a !== undefined && all.indexOf(a) === i)
-        .slice(0, 4);
-      for (const a of picks) {
-        const statue = SkeletonUtils.clone(knightModel);
-        statue.traverse((o) => {
-          if (o.isMesh) {
-            o.material = new THREE.MeshStandardMaterial({ color: 0x77736b, roughness: 0.88, normalMap: o.material.normalMap });
-            o.castShadow = o.receiveShadow = true;
-          }
-        });
-        if (idleClip) {
-          const mixer = new THREE.AnimationMixer(statue);
-          mixer.clipAction(idleClip).play();
-          mixer.setTime(idleClip.duration * 0.4); // frozen in a guarded pose
-        }
-        statue.scale.setScalar(1.35);
-        statue.position.copy(around(a, ARENA.chasm + 0.75, LOWER_TOP + CORNICE + 0.9));
-        statue.rotation.y = a + Math.PI;
-        level.add(statue);
-      }
-    },
-  };
 }

@@ -1,6 +1,7 @@
-// The storm: a sky of heavy, churning storm clouds (with fast low scud beneath) over a mountain ridge, lightning that lights up
+// The storm: a moonlit night sky (stars, a haloed moon, broken clouds with silver linings) over misty mountain ranges, lightning that lights up
 // the clouds and the ruins, and thunder that rolls in a moment later (sound made in code).
 import * as THREE from 'three';
+import { ARENA } from './layout.js';
 
 export const STORM = {
   strikeEvery: [5, 12], // seconds between lightning strikes (random in this range)
@@ -23,6 +24,7 @@ const skyFragment = /* glsl */ `
   uniform float time, flash, glow;
   varying vec3 vDir;
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
   float noise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     vec2 u = f * f * (3.0 - 2.0 * f);
@@ -31,65 +33,102 @@ const skyFragment = /* glsl */ `
   const mat2 turn = mat2(0.8, 0.6, -0.6, 0.8); // each layer of noise is rotated, so no grid shows
   float fbm(vec2 p) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 5; i++) { v += a * noise(p); p = turn * p * 2.03 + 11.7; a *= 0.5; }
+    for (int i = 0; i < 6; i++) { v += a * noise(p); p = turn * p * 2.03 + 11.7; a *= 0.5; }
     return v;
   }
-  // The storm deck: noise bent by more noise ("domain warping"), so the clouds roll and
-  // churn as time passes instead of just sliding along, plus smaller lumps on top so
-  // they look heavy and billowing.
-  float stormClouds(vec2 p, float t) {
-    vec2 q = vec2(fbm(p + vec2(0.0, t * 0.04)), fbm(p + vec2(5.2, 1.3) - t * 0.03));
-    float body = fbm(p + 1.4 * q + vec2(t * 0.02, 0.0));
-    float lumps = fbm(p * 4.0 + 2.0 * q - t * 0.05);
-    return body * 0.75 + lumps * 0.25;
+
+  // Cloud density at a point on the cloud layer: big rolling banks with gaps between them,
+  // churned by noise bent through more noise ("domain warping") so they slowly boil.
+  float clouds(vec2 p, float t) {
+    vec2 q = vec2(fbm(p * 0.6 + vec2(0.0, t * 0.02)), fbm(p * 0.6 + vec2(5.2, 1.3) - t * 0.015));
+    float n = fbm(p + 1.6 * q + vec2(t * 0.01, 0.0));
+    return smoothstep(0.36, 0.66, n); // 0 = clear sky, 1 = thick cloud
   }
+
+  // Stars: one possible star per small cell of the sky, most cells empty; each twinkles.
+  float stars(vec3 d) {
+    vec3 p = d * 260.0;
+    vec3 cell = floor(p);
+    float h = hash3(cell);
+    if (h < 0.965) return 0.0;
+    vec3 offset = vec3(hash3(cell + 1.7), hash3(cell + 3.1), hash3(cell + 5.3)) - 0.5;
+    float r = length(fract(p) - 0.5 - offset * 0.6);
+    float size = 0.06 + 0.1 * (h - 0.965) / 0.035;
+    float twinkle = 0.65 + 0.35 * sin(time * (2.0 + h * 9.0) + h * 80.0);
+    return smoothstep(size, 0.0, r) * twinkle * (0.3 + 2.5 * pow((h - 0.965) / 0.035, 3.0));
+  }
+
+  // A mountain range along the horizon: its height at each compass angle.
+  float range(float angle, float scale, float seed) {
+    return fbm(vec2(angle * scale, seed)) * 0.7 + fbm(vec2(angle * scale * 4.0, seed + 3.0)) * 0.3;
+  }
+
   void main() {
     vec3 d = normalize(vDir);
     float up = max(d.y, 0.0);
-    vec3 c = mix(horizon, zenith, pow(up, 0.45));
-
-    // The moon, only glimpsed through gaps in the clouds.
     float m = dot(d, moonDir);
-    c += vec3(0.8, 0.85, 1.0) * smoothstep(0.9993, 0.9996, m) * 0.9;
-    c += vec3(0.05, 0.06, 0.1) * pow(max(m, 0.0), 40.0);
 
-    // Clouds are drawn on a high flat layer above the world, blowing with the wind.
+    // Night sky: deep blue overhead, paler and hazier toward the horizon, brightest round the moon.
+    vec3 c = mix(horizon * 1.6, zenith, pow(up, 0.5));
+    c += vec3(0.05, 0.065, 0.1) * pow(max(m, 0.0), 6.0);  // wide glow of moonlit air
+    c += vec3(0.08, 0.09, 0.12) * pow(max(m, 0.0), 60.0); // brighter close round the moon
+
+    // Stars, fading out low down where the air is thick.
+    c += vec3(0.75, 0.8, 1.0) * stars(d) * smoothstep(0.05, 0.35, d.y) * 0.9;
+
+    // The moon: a bright disc with darker "seas" on its face, and a halo.
+    vec3 east = normalize(cross(vec3(0.0, 1.0, 0.0), moonDir));
+    vec3 north = cross(moonDir, east);
+    vec2 face = vec2(dot(d, east), dot(d, north)) / 0.028; // 0..1 across the disc
+    float disc = 1.0 - smoothstep(0.92, 1.0, length(face));
+    float seas = fbm(face * 2.2 + 4.0);
+    vec3 moon = vec3(1.0, 0.97, 0.9) * (1.15 - 0.45 * smoothstep(0.45, 0.7, seas)) * (1.0 - 0.25 * dot(face, face));
+    c = mix(c, moon * 2.2, disc);
+    c += vec3(0.35, 0.38, 0.45) * pow(max(m, 0.0), 2500.0); // the halo hugging the disc
+
+    // Clouds on a high flat layer above the world, drifting with the wind.
     vec2 wind = vec2(0.6, 0.25);
-    vec2 p = d.xz / (d.y + 0.1) * 0.35;
-    float n = stormClouds(p + wind * time * 0.03, time);
-    float cover = smoothstep(0.3, 0.48, n); // almost fully overcast
-    float thick = smoothstep(0.4, 0.62, n); // heavy, dark bellies
-    // Even the gaps aren't clear: a dim, higher layer of cloud shows through.
-    c = mix(c, vec3(0.016, 0.018, 0.026) * (0.6 + 0.8 * n), 0.85 * smoothstep(0.0, 0.15, up));
-    float moonLight = pow(max(m, 0.0), 4.0);
-    vec3 cloud = mix(vec3(0.042, 0.046, 0.062), vec3(0.005, 0.006, 0.009), thick);
-    cloud += vec3(0.08, 0.095, 0.135) * moonLight * (1.0 - thick); // silver edges toward the moon
-    float aboveHorizon = smoothstep(-0.02, 0.1, d.y);
-    c = mix(c, cloud, cover * aboveHorizon);
-
-    // Low ragged scud racing underneath, much faster than the deck above.
-    vec2 ps = p * 2.2 + wind * time * 0.09;
-    float s = fbm(ps + 1.5 * vec2(fbm(ps * 0.7 + time * 0.03), fbm(ps * 0.7 + 4.1 - time * 0.03)));
-    float scud = smoothstep(0.5, 0.8, s) * aboveHorizon;
-    c = mix(c, vec3(0.008, 0.009, 0.013) + vec3(0.04, 0.05, 0.07) * moonLight, scud * 0.75);
-
-    // Haze toward the horizon, with a faint ember-red glow, as if distant lands were burning.
-    c = mix(c, horizon, (1.0 - smoothstep(0.0, 0.2, up)) * 0.65);
-    c += vec3(0.035, 0.009, 0.006) * pow(1.0 - up, 8.0) * (0.6 + 0.4 * n);
+    vec2 p = d.xz / (d.y + 0.12) * 0.95 + wind * time * 0.006;
+    float cover = clouds(p, time);
+    // Moonlight through the cloud: sample a little toward the moon; the more cloud between
+    // here and the moon, the darker. Edges facing the moon get bright silver linings.
+    vec2 toMoon = normalize(moonDir.xz + 1e-4) * 0.06;
+    float shadow = clouds(p + toMoon, time);
+    float lit = clamp(0.45 + (cover - shadow) * 4.0, 0.0, 1.0);
+    float nearMoon = pow(max(m, 0.0), 5.0);
+    vec3 dark = vec3(0.004, 0.005, 0.008);
+    vec3 silver = vec3(0.09, 0.1, 0.125) * (1.0 + 3.0 * nearMoon);
+    vec3 cloud = mix(dark, silver, lit * (1.0 - 0.6 * cover));
+    // Thin cloud in front of the moon glows with light shining through it.
+    cloud += vec3(0.5, 0.52, 0.58) * pow(max(m, 0.0), 300.0) * (1.0 - cover) * 2.0;
+    float aboveHorizon = smoothstep(-0.02, 0.12, d.y);
+    c = mix(c, cloud, cover * 0.92 * aboveHorizon);
 
     // Lightning lights the clouds from inside, brightest around the strike.
     float near = pow(max(dot(d, flashDir), 0.0), 3.0);
-    c += vec3(0.55, 0.6, 0.8) * flash * (0.15 + 1.8 * near) * (0.3 + cover * (1.0 - 0.5 * thick) + scud * 0.3);
-    // Distant flickers deep inside the clouds (no bolt, no thunder).
+    c += vec3(0.55, 0.6, 0.8) * flash * (0.1 + 1.6 * near) * (0.2 + cover);
     float glowNear = pow(max(dot(d, glowDir), 0.0), 8.0);
-    c += vec3(0.4, 0.45, 0.65) * glow * glowNear * (0.15 + n * cover) * 1.6;
+    c += vec3(0.4, 0.45, 0.65) * glow * glowNear * cover * 1.4;
 
-    // A dark mountain ridge along the horizon.
+    // Haze toward the horizon, with a faint ember-red glow far off, as if distant lands burned.
+    c = mix(c, horizon * 1.8, (1.0 - smoothstep(0.0, 0.18, up)) * 0.7);
+    c += vec3(0.03, 0.008, 0.005) * pow(1.0 - up, 10.0);
+
+    // Two ranges of mountains: a far, pale one half lost in the haze, and a nearer, darker one,
+    // with mist pooled in the valleys between. Their moon-facing ridges catch a little light.
     float angle = atan(d.x, d.z);
-    float ridge = 0.03 + 0.07 * fbm(vec2(angle * 3.0, 1.7)) + 0.03 * fbm(vec2(angle * 14.0, 5.1));
-    if (d.y < ridge) {
-      vec3 rock = horizon * 0.55 + vec3(0.02, 0.025, 0.04) * flash * (1.0 + near * 3.0);
-      c = mix(rock, horizon, smoothstep(ridge - 0.08, ridge, d.y) * 0.25);
+    float farRidge = 0.035 + 0.11 * range(angle, 2.2, 1.7);
+    float nearRidge = 0.01 + 0.075 * range(angle, 3.4, 8.3);
+    float moonSide = 0.5 + 0.5 * dot(normalize(vec2(d.x, d.z)), normalize(moonDir.xz));
+    if (d.y < farRidge) {
+      vec3 far = horizon * 1.35 + vec3(0.012, 0.015, 0.025) * moonSide;
+      c = mix(far, c, smoothstep(farRidge - 0.004, farRidge, d.y) * 0.6);
+      c = mix(c, horizon * 1.9, smoothstep(farRidge - 0.06, farRidge - 0.01, d.y) * 0.0 + (1.0 - smoothstep(0.0, 0.05, d.y)) * 0.55);
+    }
+    if (d.y < nearRidge) {
+      vec3 nearRock = horizon * 0.55 + vec3(0.006, 0.008, 0.014) * moonSide + vec3(0.02, 0.025, 0.04) * flash;
+      c = mix(nearRock, c, smoothstep(nearRidge - 0.003, nearRidge, d.y) * 0.5);
+      c = mix(c, horizon * 1.4, (1.0 - smoothstep(-0.02, 0.03, d.y)) * 0.6); // valley mist
     }
     gl_FragColor = vec4(c, 1.0);
   }
@@ -159,7 +198,7 @@ function createSound(mixer) {
 export function createStorm(scene, { horizonColor, moonDirection }) {
   const uniforms = {
     horizon: { value: new THREE.Color(horizonColor) },
-    zenith: { value: new THREE.Color(0x020308) },
+    zenith: { value: new THREE.Color(0x05091a) },
     moonDir: { value: moonDirection.clone().normalize() },
     flashDir: { value: new THREE.Vector3(0, 0.3, -1).normalize() },
     time: { value: 0 },
@@ -173,6 +212,11 @@ export function createStorm(scene, { horizonColor, moonDirection }) {
   );
   sky.renderOrder = -1;
   sky.frustumCulled = false;
+  // The sky always surrounds the camera, so it's never further away than the camera can see.
+  sky.onBeforeRender = (renderer, scene, camera) => {
+    sky.position.copy(camera.position);
+    sky.updateMatrixWorld();
+  };
   scene.add(sky);
 
   // The flash itself: a cold light from the sky, and a jagged bolt in the distance.
@@ -214,11 +258,11 @@ export function createStorm(scene, { horizonColor, moonDirection }) {
     // Mostly somewhere ahead of the arena (toward -Z), so you see it over the tower.
     const azimuth = Math.PI + (Math.random() - 0.5) * 2.4;
     const distance = THREE.MathUtils.randFloat(...STORM.distance);
-    const ground = new THREE.Vector3(Math.sin(azimuth) * distance, 0, -52 + Math.cos(azimuth) * distance);
+    const ground = new THREE.Vector3(Math.sin(azimuth) * distance, 0, ARENA.z + Math.cos(azimuth) * distance);
     const top = ground.clone().add(new THREE.Vector3((Math.random() - 0.5) * 60, 160, (Math.random() - 0.5) * 60));
-    uniforms.flashDir.value.copy(top).setY(top.y * 0.6).sub(new THREE.Vector3(0, 0, -52)).normalize();
+    uniforms.flashDir.value.copy(top).setY(top.y * 0.6).sub(new THREE.Vector3(0, 0, ARENA.z)).normalize();
     light.position.copy(top);
-    light.target.position.set(0, 0, -52);
+    light.target.position.set(0, 0, ARENA.z);
     if (bolt) scene.remove(bolt);
     bolt = makeBolt(top, ground);
     scene.add(bolt);

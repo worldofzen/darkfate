@@ -1,5 +1,6 @@
 // Visual effects for combat:
 //   - particle bursts: blood when a blow lands, sparks when it's blocked, embers when the boss turns to ash
+//   - a slash flash: a white-hot crescent where a blade cuts through
 //   - a red flash on a character's body when hit
 //   - disintegration: the dead boss's body crumbles away into glowing embers
 import * as THREE from 'three';
@@ -70,6 +71,100 @@ function softDot() {
   return new THREE.CanvasTexture(c);
 }
 
+// --- Slash flash: a bright crescent where a blade cuts through ---
+// A flat card that always faces the camera, turned so its curved streak runs the way the
+// blade was moving. The streak sweeps on from tail to head in a few hundredths of a second,
+// glowing white-hot in its core and warm gold at its edges, then fades.
+const slashVertex = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv * 2.0 - 1.0;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const slashFragment = /* glsl */ `
+  uniform float uAge;   // 0..1 over the flash's life
+  uniform float uBend;  // how curved the streak is (and which way)
+  varying vec2 vUv;
+  void main() {
+    float x = vUv.x;
+    float along = 1.0 - x * x;
+    float curve = uBend * along - uBend * 0.35;
+    float width = 0.11 * pow(along, 0.8) + 0.004;
+    float d = abs(vUv.y - curve);
+    float core = 1.0 - smoothstep(0.0, width * 0.35, d);
+    float glow = 1.0 - smoothstep(0.0, width, d);
+    // Sweeps on from the tail (-x) to the head (+x), then burns away from the tail.
+    float head = -1.0 + 2.6 * smoothstep(0.0, 0.3, uAge);
+    float tail = -1.2 + 2.6 * smoothstep(0.25, 1.0, uAge);
+    float shown = (1.0 - smoothstep(head - 0.25, head, x)) * smoothstep(tail, tail + 0.6, x);
+    float bright = (0.5 + 0.5 * (x * 0.5 + 0.5)) * (1.0 - smoothstep(0.55, 1.0, uAge));
+    vec3 color = vec3(3.2, 2.9, 2.5) * core + vec3(2.2, 1.1, 0.35) * glow;
+    gl_FragColor = vec4(color * bright, max(core, glow * 0.8) * shown * bright);
+  }
+`;
+
+function createSlashes(scene, camera, glowTexture) {
+  const geometry = new THREE.PlaneGeometry(1, 1);
+  const pool = Array.from({ length: 6 }, () => {
+    const material = new THREE.ShaderMaterial({
+      vertexShader: slashVertex,
+      fragmentShader: slashFragment,
+      uniforms: { uAge: { value: 1 }, uBend: { value: 0.3 } },
+      transparent: true,
+      depthTest: false, // drawn over the body it cuts through
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const card = new THREE.Mesh(geometry, material);
+    card.renderOrder = 10;
+    card.visible = false;
+    card.frustumCulled = false;
+    // A burst of light where the blade bites.
+    const star = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture, color: new THREE.Color(3, 2.4, 1.6), depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending }));
+    star.renderOrder = 11;
+    star.visible = false;
+    scene.add(card, star);
+    return { card, star, material, age: 1, life: 0.24, size: 2 };
+  });
+  let next = 0;
+  const along = new THREE.Vector3();
+  return {
+    // `at`: where it cuts. `motion`: which way the blade was moving. `size`: length in meters.
+    spawn(at, motion, size = 2.2) {
+      const s = pool[next];
+      next = (next + 1) % pool.length;
+      s.age = 0;
+      s.size = size;
+      s.card.position.copy(at);
+      s.star.position.copy(at);
+      s.card.quaternion.copy(camera.quaternion);
+      // The blade's movement as seen on screen sets which way the streak runs.
+      along.copy(motion).transformDirection(camera.matrixWorldInverse);
+      const roll = along.lengthSq() > 1e-6 ? Math.atan2(along.y, along.x) : (Math.random() < 0.5 ? 0.6 : 2.5);
+      s.card.rotateZ(roll);
+      s.material.uniforms.uBend.value = (Math.random() < 0.5 ? -1 : 1) * (0.22 + Math.random() * 0.12);
+      s.card.visible = s.star.visible = true;
+    },
+    update(dt) {
+      for (const s of pool) {
+        if (!s.card.visible) continue;
+        s.age += dt / s.life;
+        if (s.age >= 1) {
+          s.card.visible = s.star.visible = false;
+          continue;
+        }
+        s.material.uniforms.uAge.value = s.age;
+        const grow = 1 + s.age * 0.18;
+        s.card.scale.set(s.size * grow, s.size * 0.55 * grow, 1);
+        const pop = Math.min(1, s.age * 5) * (1 - s.age);
+        s.star.scale.setScalar(0.3 + 0.9 * pop);
+        s.star.material.opacity = 1 - s.age;
+      }
+    },
+  };
+}
+
 // --- A red flash on a character's body when hit ---
 export function createHitFlash(model, color = new THREE.Color(0.07, 0.004, 0.003)) {
   const materials = [];
@@ -128,8 +223,9 @@ function addDissolve(model) {
   return progress;
 }
 
-export function createEffects(scene) {
+export function createEffects(scene, camera) {
   const dot = softDot();
+  const slashes = createSlashes(scene, camera, dot);
   const blood = createParticles(scene, { max: 400, size: 0.09, blending: THREE.NormalBlending, gravity: 9, drag: 1.5, texture: dot });
   const sparks = createParticles(scene, { max: 400, size: 0.05, blending: THREE.AdditiveBlending, gravity: 6, drag: 2, texture: dot });
   const embers = createParticles(scene, { max: 1500, size: 0.09, blending: THREE.AdditiveBlending, gravity: -0.9, drag: 0.6, texture: dot });
@@ -158,6 +254,13 @@ export function createEffects(scene) {
     sparks(at, awayFrom, count = 30) {
       const dir = at.clone().sub(awayFrom).setY(0).normalize().add(new THREE.Vector3(0, 0.8, 0));
       sparks.burst(at, dir, { count, speed: 7, spread: 1.8, life: 0.45, color: new THREE.Color(4, 2.2, 0.8), colorVariation: 0.4 });
+    },
+
+    // A blade cuts through: a white-hot crescent along the cut, and a spray of sparks.
+    slash(at, motion, size) {
+      slashes.spawn(at, motion, size);
+      const dir = motion.clone().normalize().add(new THREE.Vector3(0, 0.4, 0));
+      sparks.burst(at, dir, { count: 26, speed: 6, spread: 1.6, life: 0.35, color: new THREE.Color(4, 2.6, 1.2), colorVariation: 0.4 });
     },
 
     flash(model) {
@@ -214,6 +317,7 @@ export function createEffects(scene) {
           d.onDone?.();
         }
       }
+      slashes.update(dt);
       blood.update(dt);
       sparks.update(dt);
       embers.update(dt);

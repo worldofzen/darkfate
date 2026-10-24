@@ -501,9 +501,87 @@ async function dirt() {
   await save('dirt_orm', S, 3, (i) => [1 - 0.5 * (pebbles[i] > 0 ? 0 : 1 - soil[i]) * 0.6, 0.95, 0]);
 }
 
+// ---------- Hammered rock for the broken stones lying around (1024 px covers 0.8 m) ----------
+// The surface of a dressed stone worked with a point chisel: a mesh of small flat facets,
+// each tilted a different way, so light breaks up into a pebbly sparkle. The big cracks
+// are cut into the stones' shapes (src/level/stones.js), so there are only hairlines here.
+async function rockStone() {
+  const S = 1024;
+  const rand = random(37);
+  console.log('Rock...');
+  // Facets: a tiling grid of jittered points; each pixel belongs to the nearest one.
+  const N = 34;
+  const pts = Array.from({ length: N * N }, () => ({ x: rand(), y: rand(), dx: rand() - 0.5, dy: rand() - 0.5, h: rand() }));
+  const facet = new Float32Array(S * S);
+  const seam = new Float32Array(S * S);
+  const facetTone = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const gx = (x / S) * N;
+    const gy = (y / S) * N;
+    const cx = Math.floor(gx);
+    const cy = Math.floor(gy);
+    let d1 = 9;
+    let d2 = 9;
+    let best = null;
+    let bx = 0;
+    let by = 0;
+    for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) {
+      const p = pts[(((cy + j) % N + N) % N) * N + (((cx + k) % N + N) % N)];
+      const px = cx + k + p.x;
+      const py = cy + j + p.y;
+      const d = Math.hypot(gx - px, gy - py);
+      if (d < d1) {
+        d2 = d1;
+        d1 = d;
+        best = p;
+        bx = gx - px;
+        by = gy - py;
+      } else if (d < d2) d2 = d;
+    }
+    const i = y * S + x;
+    facet[i] = best.h * 0.25 + best.dx * bx * 0.9 + best.dy * by * 0.9; // a tilted flat face
+    seam[i] = 1 - smooth(0, 0.05, d2 - d1);
+    facetTone[i] = best.h;
+  }
+  const big = field(S, (u, v) => fbm(u, v, 3, 4, 911));
+  const grain = field(S, (u, v) => fbm(u, v, 40, 4, 922));
+  const fine = field(S, (u, v) => fbm(u, v, 220, 2, 933));
+  const moss = field(S, (u, v) => fbm(u, v, 8, 5, 944));
+  const hairline = new Float32Array(S * S);
+  drawCracks(hairline, S, rand, { count: 10, length: 220, width: 0.8, branchChance: 0.05 });
+  const pits = new Float32Array(S * S);
+  splat(pits, S, rand, 500, 1, 5, 1);
+
+  const height = new Float32Array(S * S);
+  for (let i = 0; i < S * S; i++) {
+    height[i] = 0.5 * facet[i] - 0.18 * seam[i] + 0.15 * grain[i] + 0.06 * fine[i] - 0.2 * hairline[i] - 0.2 * pits[i];
+  }
+  const soft = blur(height, S, 4);
+
+  await save('rock_color', S, 3, (i) => {
+    let t = mix(0.24, 0.36, smooth(0.25, 0.75, big[i])) * (0.92 + 0.16 * facetTone[i]) * (0.85 + 0.3 * grain[i]) * (0.93 + 0.14 * fine[i]);
+    t *= 1 + 0.35 * clamp01((height[i] - soft[i]) * 8); // facet ridges catch the wear
+    let r = t * 1.05;
+    let g = t * 0.98;
+    let b = t * 0.88;
+    const m = smooth(0.7, 0.84, moss[i]) * 0.4; // speckles of moss
+    r = mix(r, 0.12, m);
+    g = mix(g, 0.15, m);
+    b = mix(b, 0.06, m);
+    const dirt = Math.max(seam[i] * 0.12, hairline[i] * 0.7, pits[i] * 0.6, clamp01((soft[i] - height[i]) * 7) * 0.5);
+    return [mix(r, 0.05, dirt), mix(g, 0.045, dirt), mix(b, 0.04, dirt)];
+  });
+  await save('rock_normal', S, 3, normalFromHeight(height, S, 7), 95);
+  await save('rock_orm', S, 3, (i) => {
+    const ao = 1 - 0.7 * Math.max(seam[i] * 0.5, hairline[i], pits[i] * 0.7, clamp01((soft[i] - height[i]) * 7) * 0.7);
+    return [ao, clamp01(0.8 + 0.12 * grain[i] - 0.15 * clamp01((height[i] - soft[i]) * 8)), 0];
+  });
+}
+
 const only = process.argv[2]; // e.g. `node tools/make_textures.mjs pillar` makes just that set
 if (!only || only === 'floor') await floorStone();
 if (!only || only === 'wall') await wallStone();
 if (!only || only === 'pillar') await pillarStone();
 if (!only || only === 'dirt') await dirt();
+if (!only || only === 'rock') await rockStone();
 console.log('Done.');

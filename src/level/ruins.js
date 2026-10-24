@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { addBox, addCircle, cameraBlockers } from './colliders.js';
 import { wallStone, brokenStone, worldScaleBoxUVs } from './materials.js';
 import { stoneKinds } from './stones.js';
+import { LAYERS } from '../layers.js';
 
 export const wallMaterial = wallStone;
 
@@ -103,9 +104,12 @@ export function pillar(group, x, z, rand, model, { height = PILLAR.height } = {}
 }
 
 // Scatter broken stones (see stones.js) inside an area: mostly small pieces, some big
-// blocks, none overlapping. The big ones are solid; one instanced mesh per kind of stone.
+// blocks, none overlapping. The big ones are solid; one instanced mesh per kind of stone,
+// in full detail on screen, plus a coarse copy for their shadows (see layers.js).
+const SHADOW_STONE_STEP = 0.06;
 export function rubble(group, count, rand, { minX, maxX, minZ, maxZ, keep = () => true }) {
   const kinds = stoneKinds();
+  const shadowKinds = stoneKinds(SHADOW_STONE_STEP);
   const spots = kinds.map(() => []);
   const placed = [];
   for (let tries = 0; placed.length < count && tries < count * 30; tries++) {
@@ -126,12 +130,19 @@ export function rubble(group, count, rand, { minX, maxX, minZ, maxZ, keep = () =
   kinds.forEach(({ geometry }, k) => {
     if (!spots[k].length) return;
     const stones = new THREE.InstancedMesh(geometry, brokenStone, spots[k].length);
+    const shadow = new THREE.InstancedMesh(shadowKinds[k].geometry, brokenStone, spots[k].length);
     spots[k].forEach(({ x, z, scale }, i) => {
       turn.set((rand() - 0.5) * 0.12, rand() * Math.PI * 2, (rand() - 0.5) * 0.12); // settled a little crooked
       m.compose(new THREE.Vector3(x, -0.03 * scale, z), q.setFromEuler(turn), new THREE.Vector3(scale, scale * (0.9 + rand() * 0.2), scale));
       stones.setMatrixAt(i, m);
+      shadow.setMatrixAt(i, m);
     });
     stones.computeBoundingSphere();
+    shadow.computeBoundingSphere();
     group.add(solid(stones, false));
+    stones.layers.set(LAYERS.detail);
+    shadow.layers.set(LAYERS.shadow);
+    shadow.castShadow = true;
+    group.add(shadow);
   });
 }

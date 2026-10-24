@@ -112,7 +112,7 @@ export function createSiteOfGrace(glowTexture) {
   }
 
   // --- The ring of stones ---
-  const kinds = stoneKinds(0.06); // coarse: these stones are small
+  const kinds = stoneKinds(0.035); // a little coarser: these stones are small
   for (let i = 0; i < RING.stones; i++) {
     const a = (i / RING.stones) * Math.PI * 2 + Math.random() * 0.25;
     const kind = kinds[[5, 1, 6, 0, 5][i % 5]]; // boulders and broken blocks

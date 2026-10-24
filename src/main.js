@@ -26,7 +26,7 @@ import { createEndCredits } from './endCredits.js';
 import { createTitleScreen } from './titleScreen.js';
 import { createMixer } from './audio.js';
 import { createEffects } from './effects.js';
-import { smoothNormals } from './smoothNormals.js';
+import { LAYERS, SHADOW_STAND_INS, useShadowCameraLayers } from './layers.js';
 
 // --- Renderer: draws the 3D world onto the page ---
 // (Anti-aliasing is done by the effects in graphics.js, so it's off here.)
@@ -44,6 +44,7 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, MOBILE ? 1.5 : 2)); // 
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
+useShadowCameraLayers(renderer); // each shadow draws only its own layers (see layers.js)
 document.body.appendChild(renderer.domElement);
 
 // --- Scene: the "world" everything lives in ---
@@ -55,6 +56,7 @@ scene.fog = new THREE.FogExp2(SKY, 0.021);
 
 // --- Camera: the player script moves it to follow the knight ---
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 400);
+camera.layers.enable(LAYERS.detail); // the full-quality models (see layers.js)
 camera.position.set(SPAWN.x, 2.4, SPAWN.z + 4.5);
 camera.lookAt(SPAWN.x, 1.5, SPAWN.z);
 
@@ -72,6 +74,7 @@ moon.shadow.camera.right = 30;
 moon.shadow.camera.top = 30;
 moon.shadow.camera.bottom = -30;
 moon.shadow.camera.far = 150;
+moon.shadow.camera.layers.enable(LAYERS.shadow); // the models' simplified shadow copies (see layers.js)
 // Phones store shadow depths less precisely: a bigger bias stops surfaces speckling with "shadow acne".
 moon.shadow.bias = MOBILE ? -0.002 : -0.0005;
 moon.shadow.normalBias = MOBILE ? 0.06 : 0.02;
@@ -130,21 +133,28 @@ const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
 
 // Loads a model and returns it, with its animations (if any) in `model.animations`.
-// Its surfaces get smooth shading (see smoothNormals.js).
+// If it has a simplified shadow copy (see layers.js), that comes along inside it: the full
+// model is only drawn on screen, the copy only into the shadows. Copies (clone) carry both.
 function loadModel(url) {
-  return loader.loadAsync(url).then((gltf) => {
-    const smoothed = new Set();
+  const name = url.match(/([^/]+)\.glb$/)[1];
+  const standIn = SHADOW_STAND_INS.includes(name) ? loader.loadAsync(url.replace(/\.glb$/, '_shadow.glb')) : null;
+  return Promise.all([loader.loadAsync(url), standIn]).then(([gltf, shadow]) => {
     gltf.scene.traverse((obj) => {
       if (obj.isMesh) {
-        if (!smoothed.has(obj.geometry)) {
-          smoothNormals(obj.geometry);
-          smoothed.add(obj.geometry);
-        }
         obj.castShadow = true;
         obj.receiveShadow = true;
         obj.frustumCulled = !obj.isSkinnedMesh; // animated meshes can move outside their box
+        if (shadow) obj.layers.set(LAYERS.detail);
       }
     });
+    if (shadow) {
+      shadow.scene.traverse((obj) => {
+        if (!obj.isMesh) return;
+        obj.layers.set(LAYERS.shadow);
+        obj.castShadow = true;
+      });
+      gltf.scene.add(shadow.scene);
+    }
     gltf.scene.animations = gltf.animations;
     return gltf.scene;
   });

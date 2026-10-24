@@ -178,7 +178,7 @@ function buildWallRing(level, wallModel, lowWallModel) {
   // Above the gate, which is only half as tall: two smaller storeys stacked up to the top, on
   // top of the gate. The model is arched on one face and curves back like a dome behind it, so
   // each storey is two thin slices back to back: arches toward the arena and toward the corridor.
-  lowWallModel.then((wall) => {
+  wallModel.then((wall) => {
     const width = 2 * radius * Math.sin(GATE_SECTOR) + 1.2;
     const bottom = GATE_TOP - 0.4;
     const each = (height - 1 - bottom) / 2;
@@ -207,14 +207,14 @@ function buildWallRing(level, wallModel, lowWallModel) {
 // it up from the chasm floor like an aqueduct (squashed thin, which straightens its curve).
 const WALKWAY = { scale: 24, halfLength: 0.49, deckY: 0.003, halfWidth: 0.085 };
 
-function buildBridge(level, loadModel, lowWallModel) {
+function buildBridge(level, loadModel, wallModel) {
   const start = GATE_Z + 0.5;
   const length = WALKWAY.halfLength * 2 * WALKWAY.scale;
   const mid = start - length / 2;
   const end = CZ + ARENA.platform; // where it reaches the platform's edge
 
   // The model has arches on one face only, so two thin copies stand back to back.
-  lowWallModel.then((wall) => {
+  wallModel.then((wall) => {
     const deck = WALKWAY.halfWidth * 2 * WALKWAY.scale;
     const height = ARENA.chasmDepth + 0.5;
     for (const side of [-1, 1]) {
@@ -482,7 +482,7 @@ export function buildArena(level, rand, glow, animated, isPaved, loadModel) {
   buildGroundAndChasm(level);
   const wallModel = loadModel('models/Dungeon_wall.glb');
   const lowWallModel = loadModel('models/Dungeon_wall_low.glb');
-  const bridge = buildBridge(level, loadModel, lowWallModel);
+  const bridge = buildBridge(level, loadModel, wallModel);
   // Once the platform and walkway have loaded: their height map, then the fire bowls on the real floor.
   Promise.all([buildPlatform(level, loadModel), bridge.ready]).then((models) => {
     setGroundMap(groundMapFrom(models));

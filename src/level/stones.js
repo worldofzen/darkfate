@@ -9,7 +9,7 @@ import * as THREE from 'three';
 import { mergeVertices, mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { TEXTURE_METERS } from './materials.js';
 
-const STEP = 0.028; // mesh spacing in meters: fine enough to cut the cracks (coarser costs too much to draw)
+const STEP = 0.02; // mesh spacing in meters: fine enough to cut 2 cm cracks
 const ROUND = 0.03; // how rounded the edges are before they get chipped
 
 // ---------- Noise ----------

@@ -68,7 +68,7 @@ const MOON_OFFSET = new THREE.Vector3(25, 50, 10);
 const moon = new THREE.DirectionalLight(0x9fb6e8, 3.4); // strong, so stone edges catch cold highlights
 moon.position.copy(MOON_OFFSET);
 moon.castShadow = true;
-moon.shadow.mapSize.setScalar(MOBILE ? 1024 : 2048);
+moon.shadow.mapSize.setScalar(MOBILE ? 1024 : 4096);
 moon.shadow.camera.left = -30;
 moon.shadow.camera.right = 30;
 moon.shadow.camera.top = 30;
@@ -81,7 +81,8 @@ moon.shadow.normalBias = MOBILE ? 0.06 : 0.02;
 scene.add(moon, moon.target);
 
 // The storm sky (clouds, lightning, thunder), dust drifting through the air, and mist.
-const storm = createStorm(scene, { horizonColor: SKY, moonDirection: new THREE.Vector3(60, 90, -200) });
+const MOON_DIRECTION = new THREE.Vector3(60, 90, -200); // where the moon is in the sky
+const storm = createStorm(scene, { horizonColor: SKY, moonDirection: MOON_DIRECTION });
 const dust = createDust(makeGlowTexture(), { minX: -20, maxX: 20, minZ: ARENA.z - 25, maxZ: 10 });
 scene.add(dust);
 const mistGroups = [];
@@ -98,7 +99,7 @@ scene.add(mist);
 
 
 
-const graphics = createGraphics(renderer, scene, camera);
+const graphics = createGraphics(renderer, scene, camera, { moonDirection: MOON_DIRECTION });
 const effects = createEffects(scene, camera);
 
 // --- Title screen: the camera slowly circles the knight until you press Start ---
@@ -135,6 +136,16 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 // Loads a model and returns it, with its animations (if any) in `model.animations`.
 // If it has a simplified shadow copy (see layers.js), that comes along inside it: the full
 // model is only drawn on screen, the copy only into the shadows. Copies (clone) carry both.
+// Its surfaces are made a little rougher and less metallic than they come, so stone and
+// armor read as worn and matte rather than wet and glossy.
+const MATTE = { roughness: 1.3, metalness: 0.65 }; // multipliers
+const matted = new Set();
+function matte(material) {
+  if (matted.has(material) || !material.isMeshStandardMaterial) return;
+  matted.add(material);
+  material.roughness = Math.min(1, material.roughness * MATTE.roughness);
+  material.metalness *= MATTE.metalness;
+}
 function loadModel(url) {
   const name = url.match(/([^/]+)\.glb$/)[1];
   const standIn = SHADOW_STAND_INS.includes(name) ? loader.loadAsync(url.replace(/\.glb$/, '_shadow.glb')) : null;
@@ -144,6 +155,7 @@ function loadModel(url) {
         obj.castShadow = true;
         obj.receiveShadow = true;
         obj.frustumCulled = !obj.isSkinnedMesh; // animated meshes can move outside their box
+        matte(obj.material);
         if (shadow) obj.layers.set(LAYERS.detail);
       }
     });

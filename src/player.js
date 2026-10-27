@@ -65,7 +65,6 @@ export const FLASKS = {
   clipFrom: 0.36,
   clipTo: 0.66,
   sipAt: 0.45, // the heal happens when the head tips back, 45% of the way through
-  emptySpeedUp: 1.6, // raising an empty flask is quicker, but still leaves you open
   timeWithoutClip: 1.4, // seconds, if the animation is missing
   moveSpeed: 0.8, // m/s: a slow shuffle while drinking
 };
@@ -253,17 +252,19 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     };
   })();
 
-  // Always starts (an empty flask still gets raised), so it never returns false.
+  // With no flasks left, nothing happens (the HUD's flask slot flashes) and it returns false.
   function startDrink() {
     drinkPressed = 0;
-    const full = flasks > 0;
-    if (full) flasks--;
-    else onEmptyFlask();
+    if (flasks === 0) {
+      onEmptyFlask();
+      return false;
+    }
+    flasks--;
     mode = 'drink';
     modeTime = 0;
     // The arms drink while the legs keep doing whatever they were doing.
-    const drink = animator.performUpper('drink', { timeScale: full ? 1 : FLASKS.emptySpeedUp });
-    current = { duration: drink?.duration ?? FLASKS.timeWithoutClip, full, healed: false };
+    const drink = animator.performUpper('drink');
+    current = { duration: drink?.duration ?? FLASKS.timeWithoutClip, healed: false };
     return true;
   }
 
@@ -400,7 +401,7 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     } else if (mode === 'drink') {
       modeTime += dt;
       const progress = modeTime / current.duration;
-      if (current.full && !current.healed && progress >= FLASKS.sipAt) {
+      if (!current.healed && progress >= FLASKS.sipAt) {
         health = Math.min(MAX_HEALTH, health + FLASKS.heal);
         current.healed = true;
       }
@@ -457,9 +458,9 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
 
     // The flask is in hand only while drinking, and glows brightest at the sip.
     if (flask) {
-      flask.visible = mode === 'drink';
+      flask.userData.show(mode === 'drink');
       const progress = mode === 'drink' ? modeTime / current.duration : 0;
-      flask.userData.setGlow(mode === 'drink' && current.full ? Math.sin(Math.PI * Math.min(progress, 1)) : 0);
+      flask.userData.setGlow(mode === 'drink' ? Math.sin(Math.PI * Math.min(progress, 1)) : 0);
     }
 
     if (!active) return; // the title screen moves the camera itself

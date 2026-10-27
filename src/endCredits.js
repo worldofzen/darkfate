@@ -41,7 +41,7 @@ export function createEndCredits(mixer, onClose) {
   const screen = document.createElement('div');
   screen.className = 'credits';
   screen.innerHTML = `
-    <video src="video/end_credits.mp4" preload="auto" playsinline></video>
+    <video src="video/end_credits.mp4" preload="none" playsinline></video>
     <div class="credits-skip">Enter: skip</div>
     <div class="credits-end">
       <img src="ui/darkfate-logo.webp" alt="Darkfate">
@@ -81,6 +81,11 @@ export function createEndCredits(mixer, onClose) {
   });
 
   return {
+    // Start downloading the video (held back while the game loads).
+    preload() {
+      video.preload = 'auto';
+      video.load();
+    },
     play() {
       if (state !== 'off') return;
       state = 'video';

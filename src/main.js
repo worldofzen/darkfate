@@ -26,7 +26,7 @@ import { groundHeight } from './level/colliders.js';
 import { createEndCredits } from './endCredits.js';
 import { createTitleScreen } from './titleScreen.js';
 import { createMixer } from './audio.js';
-import { createEffects } from './effects.js';
+import { createEffects, wearDissolve } from './effects.js';
 import { createSfx } from './sfx.js';
 import { LAYERS, SHADOW_STAND_INS, useShadowCameraLayers } from './layers.js';
 import { addStoneDetail } from './detail.js';
@@ -43,7 +43,8 @@ if (!document.createElement('canvas').getContext('webgl2')) {
   throw new Error('WebGL 2 is not available');
 }
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, MOBILE ? 1.5 : 2)); // phones: fewer pixels to fill
+const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, MOBILE ? 1.5 : 2); // phones: fewer pixels to fill
+renderer.setPixelRatio(MAX_PIXEL_RATIO);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
@@ -87,7 +88,7 @@ scene.add(moon, moon.target);
 
 // The storm sky (clouds, lightning, thunder), dust drifting through the air, and mist.
 const MOON_DIRECTION = new THREE.Vector3(60, 90, -200); // where the moon is in the sky
-const storm = createStorm(scene, { horizonColor: SKY, moonDirection: MOON_DIRECTION });
+const storm = createStorm(scene, { horizonColor: SKY, moonDirection: MOON_DIRECTION, renderer });
 const dust = createDust(makeGlowTexture(), { minX: -20, maxX: 20, minZ: ARENA.z - 25, maxZ: 10 });
 scene.add(dust);
 const mistGroups = [];
@@ -143,20 +144,29 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 // Its surfaces are made a little rougher and less metallic than they come, so stone and
 // armor read as worn and matte rather than wet and glossy. The stone ones also get fine
 // close-up detail (see detail.js).
+// The models' normal maps were made the DirectX way (green = down), but three.js reads them
+// the OpenGL way (green = up), so every bump, crack and chip was lit from the wrong side and
+// surfaces looked flat and smeared. Flipping green puts the light back where it belongs.
+// Their textures also get full anisotropic filtering, so floors and walls seen at a slant
+// stay sharp instead of blurring (three.js caps it to what the graphics card allows).
 const STONE_MODELS = ['Arena_center', 'Arena_walkway', 'Arena_gate', 'Dungeon_wall', 'Dungeon_wall_low', 'Dungeon_Pillar', 'Dungeon_floor'];
 const MATTE = { roughness: 1.3, metalness: 0.65 }; // multipliers
+const TEXTURES = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap'];
 const matted = new Set();
 function matte(material, stone) {
   if (matted.has(material) || !material.isMeshStandardMaterial) return;
   matted.add(material);
   material.roughness = Math.min(1, material.roughness * MATTE.roughness);
   material.metalness *= MATTE.metalness;
+  if (material.normalMap) material.normalScale.y *= -1;
+  for (const name of TEXTURES) if (material[name]) material[name].anisotropy = 16;
   if (stone) addStoneDetail(material);
 }
+const loading = []; // every model being loaded (the warm-up waits for them all, see below)
 function loadModel(url) {
   const name = url.match(/([^/]+)\.glb$/)[1];
   const standIn = SHADOW_STAND_INS.includes(name) ? loader.loadAsync(url.replace(/\.glb$/, '_shadow.glb')) : null;
-  return Promise.all([loader.loadAsync(url), standIn]).then(([gltf, shadow]) => {
+  const load = Promise.all([loader.loadAsync(url), standIn]).then(([gltf, shadow]) => {
     gltf.scene.traverse((obj) => {
       if (obj.isMesh) {
         obj.castShadow = true;
@@ -177,6 +187,8 @@ function loadModel(url) {
     gltf.scene.animations = gltf.animations;
     return gltf.scene;
   });
+  loading.push(load);
+  return load;
 }
 
 // --- Stamina and the on-screen bar ---
@@ -260,7 +272,7 @@ Promise.all([
   loadModel('models/BOSS.glb'),
   optional('models/BOSS_sword.glb'),
 ])
-  .then(([knightModel, sword, shield, bossModel, bossSword]) => {
+  .then(async ([knightModel, sword, shield, bossModel, bossSword]) => {
     knight = knightModel;
     place(knight, SPAWN.x, SPAWN.z, SPAWN.facing);
     // Equip before animations start (it measures the hands in their resting pose).
@@ -304,7 +316,47 @@ Promise.all([
         credits.play();
       }, 1800),
     });
+
+    // Build every shader and send every texture to the graphics card now, behind the title
+    // screen. Otherwise each one is done the first time it's drawn (the flask on your first
+    // drink, the boss crumbling away, the arena the first time you look at it) and the game
+    // freezes for a moment each time. Everything is shown for this: the flask, the boss's
+    // crumbling materials, and things outside the camera's view. It waits until every model
+    // is in place (the level's load on their own), because the number of lights in the scene
+    // is built into every shader: a lamp turning up later would mean building them all again.
+    await Promise.allSettled(loading);
+    await new Promise((resolve) => setTimeout(resolve)); // (and their own set-up has run)
+    scene.traverse((o) => {
+      for (const material of [o.material ?? []].flat()) {
+        for (const value of Object.values(material)) if (value?.isTexture) renderer.initTexture(value);
+      }
+    });
+    const culled = [];
+    scene.traverse((o) => {
+      if (o.frustumCulled) culled.push(o);
+      o.frustumCulled = false;
+    });
+    wearDissolve(bossModel, true);
+    // First in the background, so the title screen keeps moving meanwhile. (Into the
+    // picture's render target, like the real thing: drawing straight to the screen needs
+    // different versions of the shaders.)
+    flask.userData.show(true);
+    renderer.setRenderTarget(graphics.renderTarget);
+    const compiled = renderer.compileAsync(scene, camera);
+    renderer.setRenderTarget(null);
+    await compiled;
+    // Then one whole frame, which also builds the shadows' and ambient occlusion's shaders.
+    flask.userData.show(true);
+    graphics.render(time);
+    flask.userData.show(false);
+    wearDissolve(bossModel, false);
+    for (const o of culled) o.frustumCulled = true;
+
     title.ready();
+    // The battle music and the end-credits video download now, after the models, rather
+    // than competing with them while the game loads.
+    mixer.preloadAll();
+    credits.preload();
     window.gameReady = true; // (index.html stops reporting start-up problems)
   })
   .catch((err) => {
@@ -372,22 +424,50 @@ function followGround(model, dt) {
 
 // Music follows the fight, always crossfading smoothly:
 //   step through the fog      calm theme -> battle theme
+//   the boss's second phase   battle theme -> second-phase theme (from 0:29)
 //   you die                   battle theme fades out under "YOU DIED"
 //   you respawn at the grace  calm theme fades back in
 //   the boss falls            battle theme fades away; the calm theme returns with the end credits
 let lastFightState = 'waiting';
+let lastBossPhase = 1;
 function updateMusic() {
   const state = fight.state;
-  if (state === lastFightState) return;
-  if (state === 'fighting') mixer.playTrack('battle', 3);
+  const phase = fight.bossPhase;
+  if (state === lastFightState && phase === lastBossPhase) return;
+  lastBossPhase = phase;
+  if (state === 'fighting') mixer.playTrack(phase === 2 ? 'battle2' : 'battle', phase === 2 ? 1.5 : 3);
   if (state === 'lost') mixer.playTrack(null, 2.5);
   if (state === 'waiting') mixer.playTrack('sanctuary', 4);
   if (state === 'won') mixer.playTrack(null, 5); // the end credits (endCredits.js) bring the calm theme back
   lastFightState = state;
 }
 
+// --- Keeping it smooth on slower computers ---
+// If the game runs well under 50 frames a second for a few seconds, it draws fewer pixels
+// (a slightly softer picture, but much less work for the graphics card), down to a limit.
+// It only ever steps down: stepping back up and down again would make it stutter.
+const SMOOTH = { below: 50, seconds: 3, step: 0.2, minimum: Math.min(MAX_PIXEL_RATIO, 0.7) };
+let pixelRatio = MAX_PIXEL_RATIO;
+let frames = 0;
+let frameTime = 0;
+function keepSmooth(realDt) {
+  if (realDt > 0.25 || document.hidden || !window.gameReady) return; // the tab was away, or still loading
+  frames++;
+  frameTime += realDt;
+  if (frameTime < SMOOTH.seconds) return;
+  const fps = frames / frameTime;
+  frames = 0;
+  frameTime = 0;
+  if (fps >= SMOOTH.below || pixelRatio <= SMOOTH.minimum) return;
+  pixelRatio = Math.max(SMOOTH.minimum, pixelRatio - SMOOTH.step);
+  renderer.setPixelRatio(pixelRatio);
+  graphics.setPixelRatio(pixelRatio);
+}
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  step(Math.min(clock.getDelta(), 0.1)); // capped, so a lag spike can't fling you through a wall
+  const realDt = clock.getDelta();
+  keepSmooth(realDt);
+  step(Math.min(realDt, 0.1)); // capped, so a lag spike can't fling you through a wall
   graphics.render(time);
 });

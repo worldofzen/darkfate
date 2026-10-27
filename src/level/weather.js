@@ -1,15 +1,172 @@
-// The storm: a moonlit night sky (stars, a haloed moon, broken clouds with silver linings) over misty mountain ranges, lightning that lights up
-// the clouds and the ruins, and thunder that rolls in a moment later (sound made in code).
+// The storm: a sky buried under heavy, churning storm cloud (no stars; the moon only a pale
+// smudge where the deck thins), misty mountain ranges along the horizon, lightning that lights
+// the clouds up from inside and the ruins below, and thunder that rolls in a moment later
+// (sound made in code).
+//
+// The clouds are real 3D volumes: for each direction in the sky, a ray steps up through a
+// thick layer of cloud (a kilometre deep, built from tiling 3D noise) and adds up how much
+// cloud it passes and how it's lit. That's too much work to do for every pixel on screen, so
+// it's worked out into a panorama of the sky (`cloudTarget`), a quarter of it each frame, and
+// the sky dome looks up each pixel there. The panorama keeps the light from each source
+// separately (dim overall light, light from above, and light from inside where lightning
+// flashes), so a flash can light it instantly, anywhere, without working the clouds out again.
 import * as THREE from 'three';
 import { ARENA } from './layout.js';
+import { MOBILE } from '../graphics.js';
 
 export const STORM = {
-  strikeEvery: [5, 12], // seconds between lightning strikes (random in this range)
-  flickerEvery: [1.5, 5], // seconds between silent flickers deep in the clouds
-  distance: [150, 280], // how far away strikes are (m); thunder arrives later from further away
+  strikeEvery: [4, 9], // seconds between lightning strikes (random in this range)
+  flickerEvery: [0.8, 3], // seconds between silent flickers deep in the clouds
+  distance: [140, 280], // how far away strikes are (m); thunder arrives later from further away
   thunderVolume: 0.55,
   windVolume: 0.05,
+  wind: [0.0035, 0.0012], // how fast the cloud drifts (noise tiles per second)
+  panorama: MOBILE ? [1024, 256] : [2048, 512], // size of the worked-out sky (texels)
+  slices: 4, // the panorama is redone a quarter at a time (one quarter per frame)
 };
+
+// --- Cloud noise: a 64x64x64 block of billowy noise that tiles in every direction ---
+// Rounded "cauliflower" lumps (inverted Worley noise: bright at the centre of each cell)
+// mixed with smooth value noise, at a few sizes.
+function makeCloudNoise(size = 64) {
+  let seed = 1337;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const wrap = (i, n) => ((i % n) + n) % n;
+
+  function worleyField(cells) {
+    const points = new Float32Array(cells ** 3 * 3).map(random);
+    return (x, y, z) => {
+      const cx = Math.floor(x), cy = Math.floor(y), cz = Math.floor(z);
+      let best = 9;
+      for (let k = -1; k <= 1; k++) for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+        const n = (wrap(cx + i, cells) + wrap(cy + j, cells) * cells + wrap(cz + k, cells) * cells * cells) * 3;
+        const dx = cx + i + points[n] - x, dy = cy + j + points[n + 1] - y, dz = cz + k + points[n + 2] - z;
+        best = Math.min(best, dx * dx + dy * dy + dz * dz);
+      }
+      return Math.min(1, Math.sqrt(best));
+    };
+  }
+  function valueField(cells) {
+    const values = new Float32Array(cells ** 3).map(random);
+    const at = (x, y, z) => values[wrap(x, cells) + wrap(y, cells) * cells + wrap(z, cells) * cells * cells];
+    const ease = (t) => t * t * (3 - 2 * t);
+    return (x, y, z) => {
+      const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+      const fx = ease(x - ix), fy = ease(y - iy), fz = ease(z - iz);
+      const lerp = (a, b, t) => a + (b - a) * t;
+      return lerp(
+        lerp(lerp(at(ix, iy, iz), at(ix + 1, iy, iz), fx), lerp(at(ix, iy + 1, iz), at(ix + 1, iy + 1, iz), fx), fy),
+        lerp(lerp(at(ix, iy, iz + 1), at(ix + 1, iy, iz + 1), fx), lerp(at(ix, iy + 1, iz + 1), at(ix + 1, iy + 1, iz + 1), fx), fy),
+        fz
+      );
+    };
+  }
+
+  const lumps = [worleyField(4), worleyField(8), worleyField(16)];
+  const smooth = [valueField(4), valueField(8), valueField(16)];
+  const data = new Uint8Array(size ** 3);
+  for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const u = (x + 0.5) / size, v = (y + 0.5) / size, w = (z + 0.5) / size;
+    let billow = 0;
+    let soft = 0;
+    [4, 8, 16].forEach((cells, i) => {
+      const weight = [0.6, 0.28, 0.12][i];
+      billow += weight * (1 - lumps[i](u * cells, v * cells, w * cells));
+      soft += weight * smooth[i](u * cells, v * cells, w * cells);
+    });
+    const value = THREE.MathUtils.clamp(billow * 0.65 + soft * 0.45 - 0.08, 0, 1);
+    data[x + y * size + z * size * size] = value * 255;
+  }
+  const texture = new THREE.Data3DTexture(data, size, size, size);
+  texture.format = THREE.RedFormat;
+  texture.minFilter = texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = texture.wrapT = texture.wrapR = THREE.RepeatWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+// --- Working out the clouds (into the sky panorama) ---
+// Across the panorama: all the way round (compass direction); up it: from just below the
+// horizon to straight up. For each texel: red = cloud lit by the dull storm light, green =
+// lit from above (where the moon shines on the top of the deck), blue = lit from within
+// (what a lightning flash inside the cloud lights up), alpha = how much sky shows through.
+const cloudVertex = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+const cloudFragment = /* glsl */ `
+  precision highp sampler3D;
+  uniform sampler3D noise;
+  uniform float time;
+  uniform vec2 wind;
+  varying vec2 vUv;
+
+  const float BASE = 420.0;  // the cloud deck's underside (m above you)
+  const float TOP = 1700.0;  // and its top
+  const float FAR = 14000.0; // nothing further than this
+
+  float height01(vec3 p) { return clamp((p.y - BASE) / (TOP - BASE), 0.0, 1.0); }
+
+  // How thick the cloud is at p: big rolling billows, a flat-ish base, lumpy tops, with
+  // smaller lumps eating at the edges. Mostly covered, as a storm should be.
+  float density(vec3 p) {
+    vec3 q = p / 2300.0;
+    q.xz += wind * time;
+    float h = height01(p);
+    float shape = texture(noise, q).r * 0.75 + texture(noise, q * 0.31 + 0.37).r * 0.45;
+    float profile = smoothstep(0.0, 0.1, h) * (1.0 - smoothstep(0.5, 1.0, h));
+    float d = shape * profile - 0.42 - 0.2 * h;
+    if (d <= 0.0) return 0.0;
+    float detail = texture(noise, q * 5.3 + vec3(0.0, time * 0.003, 0.0)).r;
+    return max(0.0, d - detail * 0.16) * 7.0;
+  }
+
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+
+  void main() {
+    float compass = (vUv.x - 0.5) * 6.2831853;
+    float up = mix(-0.05, 1.0, vUv.y);
+    float across = sqrt(max(0.0, 1.0 - up * up));
+    vec3 dir = vec3(sin(compass) * across, up, cos(compass) * across);
+    float rise = max(dir.y, 0.015);
+    float t0 = min(BASE / rise, FAR);
+    float t1 = min(min(TOP / rise, t0 + 7000.0), FAR);
+    if (t0 >= FAR) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+    const int STEPS = ${MOBILE ? 24 : 40};
+    float dt = (t1 - t0) / float(STEPS);
+    float t = t0 + dt * hash(vUv * 917.0); // a random start in each texel hides the steps
+    float clear = 1.0;
+    vec3 light = vec3(0.0);
+    for (int i = 0; i < STEPS; i++) {
+      vec3 p = dir * t;
+      float d = density(p);
+      if (d > 0.0) {
+        float h = height01(p);
+        float above = density(p + vec3(0.0, 140.0, 0.0));
+        float below = density(p - vec3(0.0, 110.0, 0.0));
+        float a = 1.0 - exp(-d * dt * 0.006);
+        light += clear * a * vec3(
+          0.3 + 0.7 * h,                  // dull light: darkest underneath
+          exp(-above * 7.0) * (0.15 + 1.2 * h), // lit from above: bright tops, dark folds
+          exp(-below * 3.0) * (1.0 - 0.6 * h) // lit from within: bright billowing undersides
+        );
+        clear *= 1.0 - a;
+        if (clear < 0.02) break;
+      }
+      t += dt;
+    }
+    // Far-off cloud fades into the haze near the horizon.
+    float haze = 1.0 - exp(-t0 / 9000.0);
+    gl_FragColor = vec4(light * (1.0 - haze), mix(clear, 1.0, haze * 0.6));
+  }
+`;
 
 // --- The sky dome ---
 const skyVertex = /* glsl */ `
@@ -20,44 +177,24 @@ const skyVertex = /* glsl */ `
   }
 `;
 const skyFragment = /* glsl */ `
+  precision highp sampler3D;
+  uniform sampler2D clouds;
+  uniform sampler3D noise;
   uniform vec3 horizon, zenith, moonDir, flashDir, glowDir;
   uniform float time, flash, glow;
   varying vec3 vDir;
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-  float hash3(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
-  float noise(vec2 p) {
+  float noise2(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     vec2 u = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
   }
-  const mat2 turn = mat2(0.8, 0.6, -0.6, 0.8); // each layer of noise is rotated, so no grid shows
+  const mat2 turn = mat2(0.8, 0.6, -0.6, 0.8);
   float fbm(vec2 p) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 6; i++) { v += a * noise(p); p = turn * p * 2.03 + 11.7; a *= 0.5; }
+    for (int i = 0; i < 5; i++) { v += a * noise2(p); p = turn * p * 2.03 + 11.7; a *= 0.5; }
     return v;
   }
-
-  // Cloud density at a point on the cloud layer: big rolling banks with gaps between them,
-  // churned by noise bent through more noise ("domain warping") so they slowly boil.
-  float clouds(vec2 p, float t) {
-    vec2 q = vec2(fbm(p * 0.6 + vec2(0.0, t * 0.02)), fbm(p * 0.6 + vec2(5.2, 1.3) - t * 0.015));
-    float n = fbm(p + 1.6 * q + vec2(t * 0.01, 0.0));
-    return smoothstep(0.36, 0.66, n); // 0 = clear sky, 1 = thick cloud
-  }
-
-  // Stars: one possible star per small cell of the sky, most cells empty; each twinkles.
-  float stars(vec3 d) {
-    vec3 p = d * 260.0;
-    vec3 cell = floor(p);
-    float h = hash3(cell);
-    if (h < 0.965) return 0.0;
-    vec3 offset = vec3(hash3(cell + 1.7), hash3(cell + 3.1), hash3(cell + 5.3)) - 0.5;
-    float r = length(fract(p) - 0.5 - offset * 0.6);
-    float size = 0.06 + 0.1 * (h - 0.965) / 0.035;
-    float twinkle = 0.65 + 0.35 * sin(time * (2.0 + h * 9.0) + h * 80.0);
-    return smoothstep(size, 0.0, r) * twinkle * (0.3 + 2.5 * pow((h - 0.965) / 0.035, 3.0));
-  }
-
   // A mountain range along the horizon: its height at each compass angle.
   float range(float angle, float scale, float seed) {
     return fbm(vec2(angle * scale, seed)) * 0.7 + fbm(vec2(angle * scale * 4.0, seed + 3.0)) * 0.3;
@@ -66,67 +203,49 @@ const skyFragment = /* glsl */ `
   void main() {
     vec3 d = normalize(vDir);
     float up = max(d.y, 0.0);
-    float m = dot(d, moonDir);
+    float m = max(dot(d, moonDir), 0.0);
 
-    // Night sky: deep blue overhead, paler and hazier toward the horizon, brightest round the moon.
-    vec3 c = mix(horizon * 1.6, zenith, pow(up, 0.5));
-    c += vec3(0.05, 0.065, 0.1) * pow(max(m, 0.0), 6.0);  // wide glow of moonlit air
-    c += vec3(0.08, 0.09, 0.12) * pow(max(m, 0.0), 60.0); // brighter close round the moon
+    // Behind the cloud: a dark sky, a little paler toward the horizon and round the hidden moon.
+    vec3 behind = mix(horizon * 1.5, zenith, pow(up, 0.5));
+    behind += vec3(0.06, 0.07, 0.09) * pow(m, 8.0) + vec3(0.12, 0.13, 0.15) * pow(m, 90.0);
 
-    // Stars, fading out low down where the air is thick.
-    c += vec3(0.75, 0.8, 1.0) * stars(d) * smoothstep(0.05, 0.35, d.y) * 0.9;
+    // The worked-out clouds for this direction (see cloudFragment).
+    float compass = atan(d.x, d.z);
+    vec2 at = vec2(compass / 6.2831853 + 0.5, (d.y + 0.05) / 1.05);
+    vec4 cloud = texture2D(clouds, at);
+    // Fine wisps, too small for the panorama, drawn straight onto the dome.
+    vec2 plane = d.xz / (d.y + 0.08);
+    float wisp = texture(noise, vec3(plane * 0.35 + time * vec2(0.0035, 0.0012) * 3.0, time * 0.002)).r;
+    float fine = 0.7 + 0.6 * wisp;
 
-    // The moon: a bright disc with darker "seas" on its face, and a halo.
-    vec3 east = normalize(cross(vec3(0.0, 1.0, 0.0), moonDir));
-    vec3 north = cross(moonDir, east);
-    vec2 face = vec2(dot(d, east), dot(d, north)) / 0.028; // 0..1 across the disc
-    float disc = 1.0 - smoothstep(0.92, 1.0, length(face));
-    float seas = fbm(face * 2.2 + 4.0);
-    vec3 moon = vec3(1.0, 0.97, 0.9) * (1.15 - 0.45 * smoothstep(0.45, 0.7, seas)) * (1.0 - 0.25 * dot(face, face));
-    c = mix(c, moon * 2.2, disc);
-    c += vec3(0.35, 0.38, 0.45) * pow(max(m, 0.0), 2500.0); // the halo hugging the disc
+    vec3 dull = vec3(0.012, 0.014, 0.02);                                  // the gloom under the storm
+    vec3 fromAbove = vec3(0.075, 0.082, 0.1) * (1.0 + 5.0 * pow(m, 6.0)); // silvered round the moon
+    vec3 c = behind * cloud.a + (cloud.r * dull + cloud.g * fromAbove) * fine;
 
-    // Clouds on a high flat layer above the world, drifting with the wind.
-    vec2 wind = vec2(0.6, 0.25);
-    vec2 p = d.xz / (d.y + 0.12) * 0.95 + wind * time * 0.006;
-    float cover = clouds(p, time);
-    // Moonlight through the cloud: sample a little toward the moon; the more cloud between
-    // here and the moon, the darker. Edges facing the moon get bright silver linings.
-    vec2 toMoon = normalize(moonDir.xz + 1e-4) * 0.06;
-    float shadow = clouds(p + toMoon, time);
-    float lit = clamp(0.45 + (cover - shadow) * 4.0, 0.0, 1.0);
-    float nearMoon = pow(max(m, 0.0), 5.0);
-    vec3 dark = vec3(0.004, 0.005, 0.008);
-    vec3 silver = vec3(0.09, 0.1, 0.125) * (1.0 + 3.0 * nearMoon);
-    vec3 cloud = mix(dark, silver, lit * (1.0 - 0.6 * cover));
-    // Thin cloud in front of the moon glows with light shining through it.
-    cloud += vec3(0.5, 0.52, 0.58) * pow(max(m, 0.0), 300.0) * (1.0 - cover) * 2.0;
-    float aboveHorizon = smoothstep(-0.02, 0.12, d.y);
-    c = mix(c, cloud, cover * 0.92 * aboveHorizon);
-
-    // Lightning lights the clouds from inside, brightest around the strike.
-    float near = pow(max(dot(d, flashDir), 0.0), 3.0);
-    c += vec3(0.55, 0.6, 0.8) * flash * (0.1 + 1.6 * near) * (0.2 + cover);
-    float glowNear = pow(max(dot(d, glowDir), 0.0), 8.0);
-    c += vec3(0.4, 0.45, 0.65) * glow * glowNear * cover * 1.4;
+    // Lightning lights the clouds from inside: brightest round the strike, spreading through
+    // the whole deck. Silent flickers light up one patch somewhere else.
+    vec3 cold = vec3(0.62, 0.68, 0.95);
+    float near = pow(max(dot(d, flashDir), 0.0), 4.0);
+    c += cold * flash * (cloud.b * (0.25 + 3.2 * near) + cloud.r * 0.25 + (1.0 - cloud.a) * 0.05) * fine;
+    float glowNear = pow(max(dot(d, glowDir), 0.0), 14.0);
+    c += cold * glow * glowNear * cloud.b * 2.2 * fine;
 
     // Haze toward the horizon, with a faint ember-red glow far off, as if distant lands burned.
-    c = mix(c, horizon * 1.8, (1.0 - smoothstep(0.0, 0.18, up)) * 0.7);
+    c = mix(c, horizon * 1.7, (1.0 - smoothstep(0.0, 0.14, up)) * 0.65);
     c += vec3(0.03, 0.008, 0.005) * pow(1.0 - up, 10.0);
 
     // Two ranges of mountains: a far, pale one half lost in the haze, and a nearer, darker one,
-    // with mist pooled in the valleys between. Their moon-facing ridges catch a little light.
+    // with mist pooled in the valleys between. Lightning shows their outlines for a moment.
     float angle = atan(d.x, d.z);
     float farRidge = 0.035 + 0.11 * range(angle, 2.2, 1.7);
     float nearRidge = 0.01 + 0.075 * range(angle, 3.4, 8.3);
-    float moonSide = 0.5 + 0.5 * dot(normalize(vec2(d.x, d.z)), normalize(moonDir.xz));
     if (d.y < farRidge) {
-      vec3 far = horizon * 1.35 + vec3(0.012, 0.015, 0.025) * moonSide;
+      vec3 far = horizon * 1.3 + cold * 0.03 * flash;
       c = mix(far, c, smoothstep(farRidge - 0.004, farRidge, d.y) * 0.6);
-      c = mix(c, horizon * 1.9, smoothstep(farRidge - 0.06, farRidge - 0.01, d.y) * 0.0 + (1.0 - smoothstep(0.0, 0.05, d.y)) * 0.55);
+      c = mix(c, horizon * 1.8, (1.0 - smoothstep(0.0, 0.05, d.y)) * 0.55);
     }
     if (d.y < nearRidge) {
-      vec3 nearRock = horizon * 0.55 + vec3(0.006, 0.008, 0.014) * moonSide + vec3(0.02, 0.025, 0.04) * flash;
+      vec3 nearRock = horizon * 0.5 + cold * 0.02 * flash;
       c = mix(nearRock, c, smoothstep(nearRidge - 0.003, nearRidge, d.y) * 0.5);
       c = mix(c, horizon * 1.4, (1.0 - smoothstep(-0.02, 0.03, d.y)) * 0.6); // valley mist
     }
@@ -194,11 +313,57 @@ function createSound(mixer) {
   };
 }
 
+
 // --- The storm ---
-export function createStorm(scene, { horizonColor, moonDirection }) {
+// `renderer` works out the clouds (see cloudFragment).
+export function createStorm(scene, { horizonColor, moonDirection, renderer }) {
+  const noise = makeCloudNoise();
+  const [width, height] = STORM.panorama;
+  const cloudTarget = new THREE.WebGLRenderTarget(width, height, {
+    type: THREE.HalfFloatType,
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    wrapS: THREE.RepeatWrapping, // all the way round, so the seam joins up
+    depthBuffer: false,
+  });
+  const cloudUniforms = {
+    noise: { value: noise },
+    time: { value: 0 },
+    wind: { value: new THREE.Vector2(...STORM.wind) },
+  };
+  const cloudScene = new THREE.Scene();
+  const cloudQuad = new THREE.Mesh(
+    new THREE.PlaneGeometry(2, 2),
+    new THREE.ShaderMaterial({ uniforms: cloudUniforms, vertexShader: cloudVertex, fragmentShader: cloudFragment, depthTest: false, depthWrite: false })
+  );
+  cloudQuad.frustumCulled = false;
+  cloudScene.add(cloudQuad);
+  const cloudCamera = new THREE.OrthographicCamera();
+  let slice = 0;
+  let filled = false;
+
+  // Redo one slice of the panorama (or all of it, the first time).
+  function workOutClouds(time) {
+    cloudUniforms.time.value = time;
+    const previous = renderer.getRenderTarget();
+    const sliceWidth = Math.ceil(width / STORM.slices);
+    const count = filled ? 1 : STORM.slices;
+    for (let i = 0; i < count; i++) {
+      cloudTarget.scissor.set(slice * sliceWidth, 0, sliceWidth, height);
+      cloudTarget.scissorTest = true;
+      renderer.setRenderTarget(cloudTarget);
+      renderer.render(cloudScene, cloudCamera);
+      slice = (slice + 1) % STORM.slices;
+    }
+    filled = true;
+    renderer.setRenderTarget(previous);
+  }
+
   const uniforms = {
+    clouds: { value: cloudTarget.texture },
+    noise: { value: noise },
     horizon: { value: new THREE.Color(horizonColor) },
-    zenith: { value: new THREE.Color(0x05091a) },
+    zenith: { value: new THREE.Color(0x04060d) },
     moonDir: { value: moonDirection.clone().normalize() },
     flashDir: { value: new THREE.Vector3(0, 0.3, -1).normalize() },
     time: { value: 0 },
@@ -219,53 +384,85 @@ export function createStorm(scene, { horizonColor, moonDirection }) {
   };
   scene.add(sky);
 
-  // The flash itself: a cold light from the sky, and a jagged bolt in the distance.
+  // The flash itself: a cold light from the sky, and a jagged bolt in the distance. The bolt
+  // is made of thin glowing rods (white-hot, so the bloom haloes them), brightest where it
+  // meets the ground and fading as it climbs back into the cloud. It's always in the scene
+  // (just empty between strikes), so its shader is built while the game loads.
   const light = new THREE.DirectionalLight(0xc8d6ff, 0);
   scene.add(light, light.target);
-  const boltMaterial = new THREE.LineBasicMaterial({ color: new THREE.Color(6, 6.5, 9), fog: false, transparent: true });
-  let bolt = null;
+  const MAX_RODS = 200;
+  const rodGeometry = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true);
+  const bolt = new THREE.InstancedMesh(
+    rodGeometry,
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(7, 7.5, 11), fog: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }),
+    MAX_RODS
+  );
+  bolt.count = 0;
+  bolt.frustumCulled = false;
+  bolt.setColorAt(0, new THREE.Color(1, 1, 1)); // (so it has per-rod brightness from the start)
+  scene.add(bolt);
 
-  function makeBolt(from, to) {
-    const points = [];
-    const branches = [];
-    const steps = 22;
+  const rod = new THREE.Object3D();
+  const along = new THREE.Vector3();
+  const shade = new THREE.Color();
+  const Y = new THREE.Vector3(0, 1, 0);
+  function addRod(a, b, radius, brightness) {
+    if (bolt.count >= MAX_RODS) return;
+    along.subVectors(b, a);
+    rod.position.copy(a).addScaledVector(along, 0.5);
+    rod.quaternion.setFromUnitVectors(Y, along.clone().normalize());
+    rod.scale.set(radius, along.length(), radius);
+    rod.updateMatrix();
+    bolt.setMatrixAt(bolt.count, rod.matrix);
+    bolt.setColorAt(bolt.count, shade.setScalar(brightness));
+    bolt.count++;
+  }
+
+  // A jagged channel from the cloud base down to the ground, with forked side branches. Its
+  // thickness grows with distance, so it stays a few pixels wide (thinner than a pixel, it
+  // would break up into dashes).
+  function makeBolt(from, to, distance) {
+    const thick = Math.max(0.55, distance * 0.004);
+    bolt.count = 0;
+    const steps = 26;
     let p = from.clone();
     for (let i = 1; i <= steps; i++) {
-      const next = from.clone().lerp(to, i / steps).add(new THREE.Vector3((Math.random() - 0.5) * 18, 0, (Math.random() - 0.5) * 18));
-      points.push(p.clone(), next.clone());
-      if (Math.random() < 0.25) {
-        // A short side branch.
+      const k = i / steps;
+      const next = from.clone().lerp(to, k).add(new THREE.Vector3((Math.random() - 0.5) * 16, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 16));
+      const brightness = Math.min(1, 0.15 + k * 1.4); // fading up into the cloud
+      addRod(p, next, thick, brightness);
+      if (Math.random() < 0.3 && k < 0.85) {
         let b = next.clone();
-        for (let k = 0; k < 4; k++) {
-          const bn = b.clone().add(new THREE.Vector3((Math.random() - 0.5) * 22, -10 - Math.random() * 10, (Math.random() - 0.5) * 22));
-          branches.push(b.clone(), bn.clone());
+        const sideways = new THREE.Vector3((Math.random() - 0.5) * 2, 0, (Math.random() - 0.5) * 2).normalize();
+        const length = 3 + Math.floor(Math.random() * 4);
+        for (let j = 0; j < length; j++) {
+          const bn = b.clone().addScaledVector(sideways, 6 + Math.random() * 8).add(new THREE.Vector3((Math.random() - 0.5) * 8, -6 - Math.random() * 8, (Math.random() - 0.5) * 8));
+          addRod(b, bn, thick * 0.5, brightness * (1 - j / length) * 0.8);
           b = bn;
         }
       }
       p = next;
     }
-    const geometry = new THREE.BufferGeometry().setFromPoints([...points, ...branches]);
-    return new THREE.LineSegments(geometry, boltMaterial);
+    bolt.instanceMatrix.needsUpdate = true;
+    bolt.instanceColor.needsUpdate = true;
   }
 
   let sound = null;
-  let nextStrike = 4;
+  let nextStrike = 3;
   let strike = null; // { start, closeness, thunderAt }
-  let nextFlicker = 2;
+  let nextFlicker = 1.5;
   let flicker = null; // { start, strength }
 
   function startStrike(time) {
     // Mostly somewhere ahead of the arena (toward -Z), so you see it over the tower.
-    const azimuth = Math.PI + (Math.random() - 0.5) * 2.4;
+    const azimuth = Math.PI + (Math.random() - 0.5) * 2.6;
     const distance = THREE.MathUtils.randFloat(...STORM.distance);
     const ground = new THREE.Vector3(Math.sin(azimuth) * distance, 0, ARENA.z + Math.cos(azimuth) * distance);
-    const top = ground.clone().add(new THREE.Vector3((Math.random() - 0.5) * 60, 160, (Math.random() - 0.5) * 60));
-    uniforms.flashDir.value.copy(top).setY(top.y * 0.6).sub(new THREE.Vector3(0, 0, ARENA.z)).normalize();
+    const top = ground.clone().add(new THREE.Vector3((Math.random() - 0.5) * 60, 230, (Math.random() - 0.5) * 60));
+    uniforms.flashDir.value.copy(top).setY(top.y * 0.8).sub(new THREE.Vector3(0, 0, ARENA.z)).normalize();
     light.position.copy(top);
     light.target.position.set(0, 0, ARENA.z);
-    if (bolt) scene.remove(bolt);
-    bolt = makeBolt(top, ground);
-    scene.add(bolt);
+    makeBolt(top, ground, distance);
     const closeness = 1 - (distance - STORM.distance[0]) / (STORM.distance[1] - STORM.distance[0]);
     strike = { start: time, closeness, thunderAt: time + distance / 340 + 0.3, thundered: false };
     nextStrike = time + THREE.MathUtils.randFloat(...STORM.strikeEvery);
@@ -284,6 +481,7 @@ export function createStorm(scene, { horizonColor, moonDirection }) {
     },
     update(time) {
       uniforms.time.value = time;
+      workOutClouds(time);
       if (time > nextStrike) startStrike(time);
       let flash = 0;
       if (strike) {
@@ -298,7 +496,7 @@ export function createStorm(scene, { horizonColor, moonDirection }) {
       // Silent flickers: a cloud somewhere lights up from inside for a moment.
       if (time > nextFlicker) {
         const a = Math.random() * Math.PI * 2;
-        uniforms.glowDir.value.set(Math.sin(a), 0.25 + Math.random() * 0.5, Math.cos(a)).normalize();
+        uniforms.glowDir.value.set(Math.sin(a), 0.2 + Math.random() * 0.5, Math.cos(a)).normalize();
         flicker = { start: time, strength: 0.4 + Math.random() * 0.6 };
         nextFlicker = time + THREE.MathUtils.randFloat(...STORM.flickerEvery);
       }
@@ -309,9 +507,8 @@ export function createStorm(scene, { horizonColor, moonDirection }) {
       }
       uniforms.glow.value = glow;
       uniforms.flash.value = flash;
-      light.intensity = flash * 7;
-      if (bolt) bolt.visible = flash > 0.35;
-      boltMaterial.opacity = Math.min(1, flash * 1.5);
+      light.intensity = flash * 8;
+      bolt.material.opacity = flash > 0.3 ? Math.min(1, flash * 1.5) : 0;
     },
   };
 }

@@ -226,5 +226,8 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
     get state() {
       return state;
     },
+    get bossPhase() {
+      return boss.phase;
+    },
   };
 }

@@ -25,11 +25,18 @@ export function createFlask() {
     new THREE.MeshStandardMaterial({ color: 0x5a3b22, roughness: 0.9 })
   );
   cork.position.y = 0.09;
-  // A faint red glow on the knight's hand and face while drinking.
+  // A faint red glow on the knight's hand and face while drinking. It stays in the scene (just
+  // dark) while the bottle is put away: the number of lights is built into every material's
+  // shader, so a light coming and going would make them all rebuild (a freeze on the first sip).
   const glow = new THREE.PointLight(0xff2a1a, 0, 1.5, 2);
-  flask.add(glass, liquid, cork, glow);
+  const bottle = new THREE.Group();
+  bottle.add(glass, liquid, cork);
+  flask.add(bottle, glow);
 
-  flask.visible = false;
+  bottle.visible = false;
+  flask.userData.show = (shown) => {
+    bottle.visible = shown;
+  };
   flask.userData.setGlow = (amount) => {
     glow.intensity = amount * 0.4;
     liquid.material.emissiveIntensity = 1.6 + amount * 2;

@@ -245,12 +245,18 @@ export function createGraphics(renderer, scene, camera, { moonDirection }) {
   sizeGrade();
 
   return {
+    renderTarget: composer.renderTarget1, // where the 3D scene is drawn, before the effects
     render(time) {
       grade.uniforms.time.value = time % 100;
       composer.render();
     },
     setSize(width, height) {
       composer.setSize(width, height);
+      sizeGrade();
+    },
+    // Call after renderer.setPixelRatio (fewer pixels drawn when the game runs slowly).
+    setPixelRatio(ratio) {
+      composer.setPixelRatio(ratio);
       sizeGrade();
     },
   };

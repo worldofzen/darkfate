@@ -187,15 +187,19 @@ export function createHitFlash(model, color = new THREE.Color(0.07, 0.004, 0.003
 }
 
 // --- Disintegration ---
-// Adds a "dissolve" to every material on `model`: patches of the body vanish, with glowing
-// ember-coloured edges, as `progress` goes from 0 to 1. Returns a function to set progress.
+// Gives every material on `model` a "dissolving" twin: patches of the body vanish, with glowing
+// ember-coloured edges, as `progress` goes from 0 to 1. Made once and kept (in each mesh's
+// userData, next to its solid material), so the game can build their shaders while it loads
+// (see `wearDissolve`) instead of freezing for a moment when the boss falls. Returns `progress`.
 function addDissolve(model) {
+  if (model.userData.dissolve) return model.userData.dissolve;
   const progress = { value: 0 };
   model.traverse((o) => {
     if (!o.isMesh) return;
-    o.userData.solidMaterial ??= o.material; // kept, so `restore` can bring the model back
-    o.material = o.material.clone();
-    o.material.onBeforeCompile = (shader) => {
+    o.userData.solidMaterial = o.material;
+    const material = o.material.clone();
+    o.userData.dissolveMaterial = material;
+    material.onBeforeCompile = (shader) => {
       shader.uniforms.dissolve = progress;
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vDissolvePos;')
@@ -218,9 +222,17 @@ function addDissolve(model) {
           float edge = 1.0 - smoothstep(0.0, 0.08, dn - (dissolve * 1.15 - 0.05));
           totalEmissiveRadiance += vec3(4.0, 1.6, 0.4) * edge * step(0.001, dissolve);`);
     };
-    o.material.needsUpdate = true;
   });
+  model.userData.dissolve = progress;
   return progress;
+}
+
+// Switch `model` between its dissolving materials (true) and its normal, solid ones (false).
+export function wearDissolve(model, on) {
+  addDissolve(model);
+  model.traverse((o) => {
+    if (o.isMesh && o.userData.solidMaterial) o.material = on ? o.userData.dissolveMaterial : o.userData.solidMaterial;
+  });
 }
 
 export function createEffects(scene, camera) {
@@ -273,6 +285,8 @@ export function createEffects(scene, camera) {
     // then disappears. `onDone` runs at the end.
     disintegrate(model, seconds = 3.5, onDone) {
       const progress = addDissolve(model);
+      progress.value = 0;
+      wearDissolve(model, true);
       model.traverse((o) => {
         if (o.isMesh) o.castShadow = false; // its shadow would stay solid otherwise
       });
@@ -285,12 +299,9 @@ export function createEffects(scene, camera) {
     restore(model) {
       const i = dissolving.findIndex((d) => d.model === model);
       if (i >= 0) dissolving.splice(i, 1);
+      wearDissolve(model, false);
       model.traverse((o) => {
-        if (!o.isMesh || !o.userData.solidMaterial) return;
-        o.material.dispose();
-        o.material = o.userData.solidMaterial;
-        delete o.userData.solidMaterial;
-        o.castShadow = true;
+        if (o.isMesh) o.castShadow = true;
       });
       model.visible = true;
     },

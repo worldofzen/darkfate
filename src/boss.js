@@ -7,6 +7,11 @@
 //   attack    swings at you (close-range swings, or leaping/spinning ones from further away)
 //   recover   a short pause after attacking: your chance to hit back
 //   stagger   flinches after taking enough damage in a short time
+//   rage      the first health bar is empty: it roars, its body catches fire from within, and
+//             a second, fresh health bar fills up (it can't be hurt while this happens)
+//
+// After `rage` comes the second phase: it glows red, swings faster and harder, and barely
+// pauses between attacks.
 //
 // Every hit also makes it recoil (on top of whatever it's doing): its upper body snaps back
 // away from the blow, it's shoved back half a step, and its body flashes white-hot, cooling
@@ -30,6 +35,14 @@ export const BOSS = {
   bladeCutSpeed: 5, // the blade hurts only while moving faster than this (m/s)
   flashTime: 0.16, // seconds the body glows after a hit
   recoil: { angle: 0.3, twist: 0.45, shove: 2.4 }, // radians (at full strength), share of that as a twist, m/s
+  phase2: {
+    name: 'Warden of the Black Spire, Unbound',
+    maxHealth: 1100,
+    speed: 1.2, // attacks and footwork play this much faster
+    damage: 1.2, // times each attack's damage
+    recoverTime: [0.15, 0.55],
+    glowColor: [1.0, 0.07, 0.02], // the red fire inside it
+  },
 };
 
 // `range` is the distance (m) at which the boss chooses that attack.
@@ -55,11 +68,38 @@ export function createBoss(boss, animator, blade, home) {
   let waitLeft = 0;
   let strafeSide = 1;
   let flash = 0; // glows for a moment when hit
+  let phase = 1;
+  let glow = 0; // the second phase's red glow (0 = none, 1 = full)
   const toPlayer = new THREE.Vector3();
   const materials = [];
   boss.traverse((o) => {
     if (o.isMesh && o.material.emissive && !materials.includes(o.material)) materials.push(o.material);
   });
+
+  // --- Glowing red (second phase) ---
+  // A dim red over the whole body, burning brighter toward its outline (where you see the
+  // surface edge-on), so it looks lit from inside; the bloom spreads it into the air. A red
+  // light in its chest throws the glow onto the floor around it. (The light is there from the
+  // start, just off, so switching it on doesn't make every material rebuild its shader.)
+  const glowUniform = { value: 0 };
+  const glowColor = new THREE.Vector3(...BOSS.phase2.glowColor);
+  for (const m of materials) {
+    const previous = m.onBeforeCompile;
+    m.onBeforeCompile = (shader, renderer) => {
+      previous?.call(m, shader, renderer);
+      shader.uniforms.bossGlow = glowUniform;
+      shader.uniforms.bossGlowColor = { value: glowColor };
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          uniform float bossGlow;
+          uniform vec3 bossGlowColor;`)
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          float edgeOn = 1.0 - saturate(dot(normal, normalize(vViewPosition)));
+          totalEmissiveRadiance += bossGlowColor * bossGlow * (0.03 + 0.9 * pow(edgeOn, 3.0));`);
+    };
+  }
+  const glowLight = new THREE.PointLight(0xff2010, 0, 9, 2);
+  (boss.getObjectByName('spine_03') ?? boss).add(glowLight);
 
   // --- Glaring down at you ---
   // The animations look straight ahead, which for a 3 m giant means over your head. After
@@ -83,7 +123,7 @@ export function createBoss(boss, animator, blade, home) {
   const headTurn = new THREE.Quaternion();
 
   function lookAtPlayer(player, dt) {
-    const wanted = !player.alive || state === 'dormant' || state === 'dead' ? 0 : state === 'stagger' ? 0.3 : 1;
+    const wanted = !player.alive || state === 'dormant' || state === 'dead' ? 0 : state === 'stagger' || state === 'rage' ? 0.3 : 1;
     lookWeight += (wanted - lookWeight) * Math.min(1, dt * 4);
     if (lookWeight < 0.01 || !headBone) return;
     boss.updateMatrixWorld(true);
@@ -175,7 +215,9 @@ export function createBoss(boss, animator, blade, home) {
   }
 
   function startAttack(attack) {
-    current = { ...attack, ...animator.perform(attack.clip) };
+    const enraged = phase === 2;
+    current = { ...attack, ...animator.perform(attack.clip, { timeScale: enraged ? BOSS.phase2.speed : 1 }) };
+    if (enraged) current.damage = Math.round(attack.damage * BOSS.phase2.damage);
     hitThisSwing = false;
     setState('attack');
   }
@@ -189,6 +231,7 @@ export function createBoss(boss, animator, blade, home) {
   // `player` is { position, alive, takeHit(damage, from) } and `playerBody` its size.
   function update(dt, player, playerBody) {
     stateTime += dt;
+    const pace = phase === 2 ? BOSS.phase2.speed : 1; // footwork
     sinceHit += dt;
     if (sinceHit > BOSS.poiseResetTime) poiseDamage = 0;
     toPlayer.subVectors(player.position, boss.position).setY(0);
@@ -208,11 +251,11 @@ export function createBoss(boss, animator, blade, home) {
       if (attack) {
         startAttack(attack);
       } else if (distance > BOSS.runIfFurtherThan) {
-        boss.position.addScaledVector(forward(), BOSS.runSpeed * dt);
-        animator.locomote('run', BOSS.runSpeed);
+        boss.position.addScaledVector(forward(), BOSS.runSpeed * pace * dt);
+        animator.locomote('run', BOSS.runSpeed * pace);
       } else if (distance > 3.0 || waitLeft <= 0) {
-        boss.position.addScaledVector(forward(), BOSS.walkSpeed * dt);
-        animator.locomote('walk', BOSS.walkSpeed);
+        boss.position.addScaledVector(forward(), BOSS.walkSpeed * pace * dt);
+        animator.locomote('walk', BOSS.walkSpeed * pace);
       } else {
         // Close but still catching its breath: circle around you.
         if (stateTime > 2) {
@@ -235,7 +278,7 @@ export function createBoss(boss, animator, blade, home) {
       }
       if (progress >= 1) {
         animator.release();
-        waitLeft = THREE.MathUtils.randFloat(...BOSS.recoverTime);
+        waitLeft = THREE.MathUtils.randFloat(...(phase === 2 ? BOSS.phase2.recoverTime : BOSS.recoverTime));
         setState('recover');
       }
     } else if (state === 'recover') {
@@ -244,6 +287,13 @@ export function createBoss(boss, animator, blade, home) {
       if (stateTime >= waitLeft) setState('chase');
     } else if (state === 'stagger') {
       if (stateTime >= current.duration) backToChase();
+    } else if (state === 'rage') {
+      faceTowards(player.position, dt, BOSS.turnSpeed * 0.5);
+      if (stateTime >= current.duration) {
+        phase = 2;
+        health = BOSS.phase2.maxHealth;
+        backToChase();
+      }
     }
 
     // Shoved back by a hit (quickly slowing to a stop).
@@ -261,6 +311,13 @@ export function createBoss(boss, animator, blade, home) {
     flash = Math.max(0, flash - dt);
     const k = flash / BOSS.flashTime;
     for (const m of materials) m.emissive.setRGB(0.42 * k, 0.28 * k * k, 0.18 * k * k * k);
+
+    // The red glow: catches during the roar, then throbs like a heartbeat; dies with it.
+    const glowWanted = state === 'dead' ? 0 : state === 'rage' ? Math.min(1, (stateTime / current.duration) * 1.5) : phase === 2 ? 1 : 0;
+    glow += (glowWanted - glow) * Math.min(1, dt * (state === 'dead' ? 1.5 : 4));
+    const beat = 0.8 + 0.2 * Math.sin((performance.now() / 1000) * 4.5);
+    glowUniform.value = glow * beat;
+    glowLight.intensity = 14 * glow * beat;
   }
 
   // --- Things the fight tells the boss ---
@@ -272,11 +329,19 @@ export function createBoss(boss, animator, blade, home) {
 
   // `from`: where the blow came from. Returns true if this hit killed it.
   function takeDamage(amount, from) {
-    if (state === 'dead') return false;
+    if (state === 'dead' || state === 'rage') return false;
     health = Math.max(0, health - amount);
     sinceHit = 0;
     flash = BOSS.flashTime;
     if (from && health > 0) recoil(from, THREE.MathUtils.clamp(amount / 55, 0.7, 1.4)); // harder blows rock it further
+    if (health <= 0 && phase === 1) {
+      // Not dead yet: the second phase begins.
+      poiseDamage = 0;
+      knock.set(0, 0, 0);
+      current = animator.perform('power_up', { timeScale: 0.85 }) ?? { duration: 2 };
+      setState('rage');
+      return false;
+    }
     if (health <= 0) {
       animator.perform('death');
       setState('dead');
@@ -284,7 +349,7 @@ export function createBoss(boss, animator, blade, home) {
     }
     if (state === 'dormant') wake();
     poiseDamage += amount;
-    if (poiseDamage >= BOSS.poise && state !== 'intro') {
+    if (poiseDamage >= BOSS.poise * phase && state !== 'intro') { // twice as hard to stagger once enraged
       poiseDamage = 0;
       const stagger = animator.perform('impact', { timeScale: 1.1 });
       if (stagger) {
@@ -298,6 +363,8 @@ export function createBoss(boss, animator, blade, home) {
   // Back to the start, full health, waiting (used when you die and respawn).
   function reset() {
     health = BOSS.maxHealth;
+    phase = 1;
+    glow = 0;
     poiseDamage = 0;
     waitLeft = 0;
     boss.position.copy(home.position);
@@ -318,8 +385,14 @@ export function createBoss(boss, animator, blade, home) {
     get state() {
       return state;
     },
+    // 1 or 2 (it becomes 2 as soon as the second health bar starts filling).
+    get phase() {
+      return state === 'rage' ? 2 : phase;
+    },
+    // Of the current phase's health bar. While it roars, the second bar fills up.
     get healthFraction() {
-      return health / BOSS.maxHealth;
+      if (state === 'rage') return Math.min(1, stateTime / current.duration);
+      return health / (phase === 2 ? BOSS.phase2.maxHealth : BOSS.maxHealth);
     },
   };
 }

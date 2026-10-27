@@ -1,7 +1,8 @@
 // On-screen bars and messages, styled after Elden Ring:
 //   - your health: an ornate crimson bar with a blood-red gem (ui/health_bar_*.webp), and
 //     your stamina (green) under it, in the top-left
-//   - the boss's name and its gothic crimson health bar (ui/boss_bar_*.webp) along the bottom
+//   - the boss's name and its gothic crimson health bar (ui/boss_bar_*.webp) along the bottom;
+//     in its second phase a new bar takes over, burning brighter and throbbing red
 //   - big "YOU DIED" / "ENEMY FELLED" messages
 //   - the Flask of Crimson Tears slot in the bottom-left (ui/flask.webp), with how many charges are left
 // When a bar drops, a pale "ghost" piece shows how much was just lost, then shrinks away.
@@ -41,6 +42,18 @@ style.textContent = `
   .hud-bossname { color: #e6dcc4; font: 17px Georgia, 'Times New Roman', serif; margin: 0 0 -14px 10%;
     text-shadow: 0 1px 3px #000; letter-spacing: 0.02em; position: relative; z-index: 1; }
   .hud-boss { width: 100%; aspect-ratio: 6.4057; filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.85)); }
+  /* The second phase's bar: it flares in, then burns. */
+  .hud-bossbar.phase2 .hud-bossname { color: #ffb39a; text-shadow: 0 0 8px rgba(255, 40, 20, 0.85), 0 1px 3px #000; }
+  .hud-bossbar.phase2 .hud-art-fill { filter: saturate(1.6) brightness(1.45); }
+  .hud-bossbar.phase2 .hud-boss { animation: hud-new-bar 1s ease-out, hud-burn 1.4s ease-in-out 1s infinite; }
+  @keyframes hud-new-bar {
+    0% { filter: brightness(3) drop-shadow(0 0 22px #ff3a1a); transform: scaleX(0.94); }
+    100% { filter: drop-shadow(0 0 4px rgba(255, 40, 20, 0.6)) drop-shadow(0 2px 5px rgba(0, 0, 0, 0.85)); }
+  }
+  @keyframes hud-burn {
+    0%, 100% { filter: drop-shadow(0 0 4px rgba(255, 40, 20, 0.6)) drop-shadow(0 2px 5px rgba(0, 0, 0, 0.85)); }
+    50% { filter: drop-shadow(0 0 10px rgba(255, 50, 20, 0.95)) drop-shadow(0 2px 5px rgba(0, 0, 0, 0.85)); }
+  }
 
   .hud-banner {
     position: fixed; left: 0; right: 0; top: 42%; text-align: center; pointer-events: none;
@@ -229,7 +242,13 @@ export function createHud() {
     },
     showBoss(name) {
       bossName.textContent = name;
+      bossPanel.classList.remove('phase2');
       bossPanel.classList.add('shown');
+    },
+    // The boss's second phase: its new name over the new, burning bar.
+    showBossPhase2(name) {
+      bossName.textContent = name;
+      bossPanel.classList.add('phase2');
     },
     hideBoss() {
       bossPanel.classList.remove('shown');

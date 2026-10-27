@@ -3,6 +3,7 @@
 //   - your sword hurts the boss, and the boss's sword hurts you (see hitbox.js and below)
 //   - you and the boss can't walk through each other
 //   - if you die: "YOU DIED", then you're back at the Site of Grace and the boss resets
+//   - when its first health bar runs out, the boss enrages: a second phase with a new bar
 //   - if the boss dies: "ENEMY FELLED", and the fog gate disappears for good
 import * as THREE from 'three';
 import { GATE_Z } from './level/layout.js';
@@ -72,6 +73,7 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
   let lastSwingHeard = -1;
   let lastMode = player.mode;
   let bossBladeFast = false;
+  let bossPhase = 1;
 
   function bossInReach() {
     apart.subVectors(bossModel.position, knight.position).setY(0);
@@ -107,6 +109,18 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
 
     if (state === 'waiting' && target.alive && knight.position.z < FIGHT_STARTS_PAST) startFight();
 
+    // The first health bar is empty: it erupts in red, and the second bar takes over.
+    if (boss.phase !== bossPhase) {
+      bossPhase = boss.phase;
+      if (bossPhase === 2) {
+        hud.showBossPhase2(BOSS.phase2.name);
+        const at = bossChest.getWorldPosition(new THREE.Vector3());
+        effects.sparks(at, at.clone().setY(0), 120);
+        sfx.guardBreak();
+        player.shake(0.5);
+      }
+    }
+
     // Sounds: your blade whooshes as it comes through, rolls thump, the boss's blade whooshes
     // as it picks up speed.
     const swing = player.swing;
@@ -132,16 +146,23 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
       const at = bossChest.getWorldPosition(new THREE.Vector3());
       // The slash flashes across the front of its body, on your side, along your blade's path.
       const cut = at.clone().addScaledVector(apart.setY(0).normalize(), -BOSS.body.radius * 0.7);
-      effects.slash(cut, playerBlade.motion(), swing.damage > 55 ? 2.9 : 2.3);
-      sfx.cut(swing.damage > 55);
-      effects.blood(at, knight.position);
-      effects.hitStop(0.06);
-      player.shake(0.08);
-      if (boss.takeDamage(swing.damage, knight.position)) {
-        state = 'won';
-        timer = 0;
-        hud.showBanner('ENEMY FELLED', 'felled', 4);
-        level.removeFogGate();
+      if (boss.state === 'rage') {
+        // It can't be hurt while it enrages: your blade glances off.
+        sfx.block();
+        effects.sparks(cut, knight.position, 30);
+        player.shake(0.1);
+      } else {
+        effects.slash(cut, playerBlade.motion(), swing.damage > 55 ? 2.9 : 2.3);
+        sfx.cut(swing.damage > 55);
+        effects.blood(at, knight.position);
+        effects.hitStop(0.06);
+        player.shake(0.08);
+        if (boss.takeDamage(swing.damage, knight.position)) {
+          state = 'won';
+          timer = 0;
+          hud.showBanner('ENEMY FELLED', 'felled', 4);
+          level.removeFogGate();
+        }
       }
     }
 

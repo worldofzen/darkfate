@@ -32,18 +32,15 @@ const ATTACK_TIME_SCALE = 1.3; // play the swings a little faster than the pack 
 const COMBO_OPENS = 0.35; // a click after 35% of the swing is remembered for the next one
 const RECOVERY = 0.75; // after 75% of the swing you can chain, dodge or walk away
 
-// Dodges. The animation pack has no roll, so the roll is made here: the knight crouches behind
-// his shield, curls up, and the whole body turns head over heels once while sliding forward.
-// (A Mixamo roll saved as mixamo/Knight/roll.fbx would be used instead, after
-// `npm.cmd run animations`.)
+// Dodges. The roll is Mixamo's "Falling To Roll" (mixamo/Knight/Falling To Roll.fbx, renamed
+// "roll" in rename.json): a dive forward, over the shoulder and back up. It's played a little
+// faster than it comes, and you're free again once he's back on his feet (the rest of the clip
+// is just standing). The knight travels exactly as far as the animation does, moment by moment,
+// so his feet don't slide.
 const ROLL = {
-  clip: 'crouch_block_idle', // the pose he curls up from
-  duration: 0.72, // seconds
-  distance: 3.3, // meters covered
-  spin: [0.06, 0.68], // part of the roll spent turning over
-  pivot: 0.62, // height (m) of the middle of the curled-up body, which it turns around
-  tuck: 1.3, // radians the back and head curl forward at most
-  knees: 1.0, // radians the thighs come up toward the chest (the shins fold back half as much again)
+  clip: 'roll',
+  timeScale: 1.4,
+  over: 0.8, // share of the clip by which he's standing again
 };
 const BACKSTEP = { clip: 'run_back', timeScale: 1.3 }; // quick hop backwards
 const INVULNERABLE_PART = 0.6; // can't be hurt during the first 60% of a dodge
@@ -216,18 +213,15 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
   function startDodge() {
     const rolling = input.lengthSq() > 0;
     if (!rolling) return startBackstep();
-    const realRoll = animator.has('roll');
-    if (!(realRoll || animator.has(ROLL.clip)) || !stamina.spend(STAMINA.dodge)) return false;
+    if (!rollTravel || !stamina.spend(STAMINA.dodge)) return false;
     dodgePressed = 0;
     faceAngle = Math.atan2(input.x, input.z);
     knight.rotation.y = faceAngle; // rolls snap to the new direction
-    let duration = ROLL.duration;
-    if (realRoll) duration = animator.perform('roll').duration;
-    else animator.perform(ROLL.clip, { fade: 0.08 });
+    const roll = animator.perform(ROLL.clip, { timeScale: ROLL.timeScale, fade: 0.08 });
     mode = 'dodge';
     modeTime = 0;
     const direction = new THREE.Vector3(Math.sin(faceAngle), 0, Math.cos(faceAngle));
-    current = { duration, speed: ROLL.distance / duration, direction, roll: !realRoll };
+    current = { duration: roll.duration * ROLL.over, direction, roll: true, travelled: 0 };
     return true;
   }
 
@@ -242,50 +236,22 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     return true;
   }
 
-  // --- Turning head over heels (the made-up roll) ---
-  // Runs after each frame's animation: curls the back and head forward and pulls the knees to
-  // the chest, then turns the whole skeleton round the middle of the curled-up body, about the
-  // knight's sideways axis.
-  const pelvis = knight.getObjectByName('pelvis');
-  const TUCK_BONES = [['spine_01', 0.3], ['spine_02', 0.3], ['spine_03', 0.2], ['neck_01', 0.2]]
-    .map(([name, share]) => ({ bone: knight.getObjectByName(name), share }))
-    .filter((b) => b.bone);
-  // Turning a thigh the other way brings its knee forward; the shin then folds back under it.
-  const KNEE_BONES = [['thigh_l', 1], ['thigh_r', 1], ['calf_l', -0.5], ['calf_r', -0.5]]
-    .map(([name, share]) => ({ bone: knight.getObjectByName(name), share }))
-    .filter((b) => b.bone);
-  const sideways = new THREE.Vector3();
-  const pivot = new THREE.Vector3();
-  const turnBy = new THREE.Quaternion();
-  const parentTurn = new THREE.Quaternion();
-  const localTurn = new THREE.Quaternion();
-  const bonePosition = new THREE.Vector3();
-  const UP = new THREE.Vector3(0, 1, 0);
-
-  // Turn `bone` by `angle` about the world axis `sideways` (and round `around`, if given).
-  function turnBone(bone, angle, around) {
-    turnBy.setFromAxisAngle(sideways, angle);
-    bone.parent.getWorldQuaternion(parentTurn);
-    localTurn.copy(parentTurn).invert().multiply(turnBy).multiply(parentTurn);
-    bone.quaternion.premultiply(localTurn);
-    if (around) {
-      bone.getWorldPosition(bonePosition).sub(around).applyQuaternion(turnBy).add(around);
-      bone.position.copy(bone.parent.worldToLocal(bonePosition));
-    }
-  }
-
-  function poseRoll(progress) {
-    if (!pelvis) return;
-    knight.updateMatrixWorld(true);
-    sideways.crossVectors(UP, current.direction).normalize(); // turning about it tips the head forward
-    const curl = Math.sin(Math.PI * Math.min(1, progress / 0.9));
-    for (const { bone, share } of TUCK_BONES) turnBone(bone, ROLL.tuck * share * curl);
-    for (const { bone, share } of KNEE_BONES) turnBone(bone, ROLL.knees * share * curl);
-    const spin = THREE.MathUtils.smoothstep(progress, ROLL.spin[0], ROLL.spin[1]);
-    pivot.copy(knight.position);
-    pivot.y += ROLL.pivot + 0.12 * Math.sin(Math.PI * spin); // a little lift as it goes over
-    turnBone(pelvis, spin * Math.PI * 2, pivot);
-  }
+  // How far forward the roll animation has carried the hips at each moment (meters, by
+  // seconds into the clip). Read before the animator pins the hips in place (see animator.js).
+  const rollTravel = (() => {
+    const clip = knight.animations?.find((c) => c.name === ROLL.clip);
+    const track = clip?.tracks.find((t) => /(hips|pelvis).position$/i.test(t.name));
+    if (!track) return null;
+    const forward = Array.from({ length: track.times.length }, (_, i) => track.values[i * 3 + 2] - track.values[2]);
+    return (seconds) => {
+      const t = track.times;
+      if (seconds <= t[0]) return 0;
+      for (let i = 1; i < t.length; i++) {
+        if (seconds <= t[i]) return THREE.MathUtils.lerp(forward[i - 1], forward[i], (seconds - t[i - 1]) / (t[i] - t[i - 1]));
+      }
+      return forward[forward.length - 1];
+    };
+  })();
 
   // Always starts (an empty flask still gets raised), so it never returns false.
   function startDrink() {
@@ -417,11 +383,15 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     } else if (mode === 'dodge') {
       modeTime += dt;
       const progress = modeTime / current.duration;
-      // Rolls are quickest while turning over and slow as he gets up; backsteps slow at the end.
-      const ease = current.roll
-        ? 1.25 * (progress < 0.68 ? 1 : Math.max(0, (1 - progress) / 0.32))
-        : progress < 0.75 ? 1 : Math.max(0, (1 - progress) / 0.25);
-      knight.position.addScaledVector(current.direction, current.speed * ease * dt);
+      if (current.roll) {
+        // Move as far as the animation has carried him since last frame.
+        const travelled = rollTravel(Math.min(modeTime, current.duration) * ROLL.timeScale);
+        knight.position.addScaledVector(current.direction, travelled - current.travelled);
+        current.travelled = travelled;
+      } else {
+        const ease = progress < 0.75 ? 1 : Math.max(0, (1 - progress) / 0.25); // backsteps slow at the end
+        knight.position.addScaledVector(current.direction, current.speed * ease * dt);
+      }
       pushOut(knight.position, BODY_RADIUS);
       if (progress >= 1) backToFree();
     } else if (mode === 'stagger') {
@@ -484,7 +454,6 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     drinkPressed = Math.max(0, drinkPressed - dt);
     stamina.update(dt, { blocking: mode === 'free' && blockHeld });
     animator.update(dt);
-    if (mode === 'dodge' && current.roll) poseRoll(Math.min(1, modeTime / current.duration));
 
     // The flask is in hand only while drinking, and glows brightest at the sip.
     if (flask) {

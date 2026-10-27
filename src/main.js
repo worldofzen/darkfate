@@ -21,6 +21,7 @@ import { createGraphics, MOBILE } from './graphics.js';
 import { createDust } from './level/atmosphere.js';
 import { createStorm } from './level/weather.js';
 import { createMist } from './level/mist.js';
+import { installGroundFog } from './level/heightFog.js';
 import { groundHeight } from './level/colliders.js';
 import { createEndCredits } from './endCredits.js';
 import { createTitleScreen } from './titleScreen.js';
@@ -55,6 +56,8 @@ const SKY = 0x151d2b; // the night haze (also the fog colour, so distant things 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
 scene.fog = new THREE.FogExp2(SKY, 0.021);
+// Plus mist lying on the ground, thickest in the arena and pooled in its chasm.
+const groundFog = installGroundFog({ x: 0, z: ARENA.z, radius: ARENA.chasm + 4 });
 
 // --- Camera: the player script moves it to follow the knight ---
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 400);
@@ -94,7 +97,6 @@ for (let k = 1; k < 18; k++) {
   const r = (ARENA.platform + ARENA.chasm) / 2;
   mistGroups.push({ count: 3, center: new THREE.Vector3(Math.sin(a) * r, -8, ARENA.z + Math.cos(a) * r), spread: [9, 5, 9], size: [12, 20], opacity: 0.5 });
 }
-mistGroups.push({ count: 10, center: new THREE.Vector3(0, 1.2, ARENA.z), spread: [36, 1, 36], size: [8, 14], opacity: 0.12 }); // low over the arena
 mistGroups.push({ count: 6, center: new THREE.Vector3(0, 1.5, -14), spread: [8, 1, 18], size: [6, 10], opacity: 0.1 }); // in the corridor
 const mist = createMist(mistGroups);
 scene.add(mist);
@@ -327,6 +329,7 @@ function step(realDt) {
   time += dt;
   level.update(time, camera);
   dust.userData.update(time);
+  groundFog.update(time);
   mist.userData.update(time, camera);
   towerMist?.userData.update(time, camera);
   storm.update(time);

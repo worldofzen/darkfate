@@ -14,7 +14,6 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ARENA, BRIDGE, GATE_Z, GATE_TOP } from './layout.js';
 import { dirtMeters } from './materials.js';
 import { createBrazier } from './brazier.js';
-import { createGroundFog } from './groundFog.js';
 import { addCircle, setWalkArea, setGroundMap, groundHeight } from './colliders.js';
 
 const CZ = ARENA.z;
@@ -492,10 +491,16 @@ export function buildArena(level, rand, glow, animated, isPaved, loadModel) {
   buildGrass(level, rand, animated, isPaved);
   buildVines(level, rand, animated);
 
-  // Low fog rolling over the platform, spilling a little past its edge.
-  const fog = createGroundFog(new THREE.Vector3(0, 0.1, CZ), ARENA.platform + 6);
-  level.add(fog);
-  animated.push(fog);
+  // A sea of mist filling the chasm a little below the platform's rim, out to the horizon: a dark surface that the
+  // ground mist (see heightFog.js) buries, so it shows as thick, drifting mist with nothing
+  // under it showing through.
+  const sea = new THREE.Mesh(
+    new THREE.RingGeometry(ARENA.platform - 1, 150, 96, 4).rotateX(-Math.PI / 2),
+    // ("transparent" keeps it out of the ambient occlusion, which would draw a dark crease where it meets the walls)
+    new THREE.MeshBasicMaterial({ color: 0x05070b, transparent: true })
+  );
+  sea.position.set(0, -2.2, CZ);
+  level.add(sea);
 
   // You can only stand on the platform and the bridge (the rest is a long drop).
   setWalkArea((x, z) => z < GATE_Z - 0.2, [

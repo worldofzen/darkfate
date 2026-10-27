@@ -11,11 +11,11 @@ import { BOSS } from './boss.js';
 import { PLAYER_BODY } from './player.js';
 
 const FIGHT_STARTS_PAST = GATE_Z - 1.5; // a little way into the arena
-// Your hits: the blade decides WHEN a swing hurts (only while it's moving fast), and the boss
-// must be within reach in front of you. (The pack's swings curve around the knight's sword side
-// rather than straight ahead, so tracing the blade exactly made hits on a target right in front
-// of you miss.) The boss's big swings DO trace its blade exactly, so you can dodge under them.
-const PLAYER_CUT_SPEED = 4; // m/s
+// Your hits: each swing hurts only while its blade comes through (its `cutting` window, see
+// player.js), and the boss must be within reach in front of you. (The pack's swings curve
+// around the knight's sword side rather than straight ahead, so tracing the blade exactly made
+// hits on a target right in front of you miss.) The boss's big swings DO trace its blade
+// exactly, so you can dodge under them.
 const PLAYER_REACH = 1.8; // meters from your center to the boss's body (arm + sword)
 const PLAYER_ARC = THREE.MathUtils.degToRad(80); // how far to the side a swing still connects
 const YOU_DIED_AFTER = 1.2; // seconds after falling
@@ -23,8 +23,10 @@ const RESPAWN_AFTER = 5;
 const HIDE_BOSS_BAR_AFTER_WIN = 5;
 
 const DISINTEGRATE_AFTER = 2.3; // seconds after the killing blow: the boss has fallen by then
+const BOSS_WHOOSH_SPEED = 9; // m/s: the boss's blade makes its whoosh as it passes this speed
 
-export function createFight({ knight, player, playerBlade, bossModel, boss, level, hud, stamina, effects, onBossGone }) {
+// `sfx` plays the combat sounds (see sfx.js).
+export function createFight({ knight, player, playerBlade, bossModel, boss, bossBlade, level, hud, stamina, effects, sfx, onBossGone }) {
   let state = 'waiting'; // 'waiting', 'fighting', 'won' or 'lost'
   let timer = 0;
   let lastSwingThatHit = -1;
@@ -41,16 +43,19 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, leve
       const at = knight.position.clone().add(new THREE.Vector3(0, 1.25, 0));
       at.addScaledVector(new THREE.Vector3().subVectors(from, knight.position).setY(0).normalize(), 0.3);
       if (result === 'hit' || result === 'killed') {
+        sfx.hurt();
         effects.blood(at, from);
         knightFlash.trigger();
         hud.flashDamage();
         player.shake(0.35);
         effects.hitStop(0.09);
       } else if (result === 'blocked') {
+        sfx.block();
         effects.sparks(at, from, 30);
         player.shake(0.15);
         effects.hitStop(0.05);
       } else if (result === 'guard broken') {
+        sfx.guardBreak();
         effects.sparks(at, from, 60);
         hud.flashDamage();
         player.shake(0.3);
@@ -64,6 +69,9 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, leve
   let disintegrated = false;
   const apart = new THREE.Vector3();
   const facing = new THREE.Vector3();
+  let lastSwingHeard = -1;
+  let lastMode = player.mode;
+  let bossBladeFast = false;
 
   function bossInReach() {
     apart.subVectors(bossModel.position, knight.position).setY(0);
@@ -99,13 +107,25 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, leve
 
     if (state === 'waiting' && target.alive && knight.position.z < FIGHT_STARTS_PAST) startFight();
 
-    // Your sword hitting the boss (each swing can only hit once).
+    // Sounds: your blade whooshes as it comes through, rolls thump, the boss's blade whooshes
+    // as it picks up speed.
     const swing = player.swing;
+    if (swing?.cutting && swing.id !== lastSwingHeard) {
+      lastSwingHeard = swing.id;
+      sfx.swing(swing.damage > 55);
+    }
+    if (player.mode === 'dodge' && lastMode !== 'dodge') sfx.roll();
+    lastMode = player.mode;
+    const bossFast = boss.state === 'attack' && bossBlade.speed > BOSS_WHOOSH_SPEED;
+    if (bossFast && !bossBladeFast) sfx.heavySwing();
+    bossBladeFast = bossFast;
+
+    // Your sword hitting the boss (each swing can only hit once).
     if (
       state === 'fighting' &&
       swing &&
       swing.id !== lastSwingThatHit &&
-      playerBlade.speed > PLAYER_CUT_SPEED &&
+      swing.cutting &&
       bossInReach()
     ) {
       lastSwingThatHit = swing.id;
@@ -113,6 +133,7 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, leve
       // The slash flashes across the front of its body, on your side, along your blade's path.
       const cut = at.clone().addScaledVector(apart.setY(0).normalize(), -BOSS.body.radius * 0.7);
       effects.slash(cut, playerBlade.motion(), swing.damage > 55 ? 2.9 : 2.3);
+      sfx.cut(swing.damage > 55);
       effects.blood(at, knight.position);
       effects.hitStop(0.06);
       player.shake(0.08);

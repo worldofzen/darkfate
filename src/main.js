@@ -26,7 +26,9 @@ import { createEndCredits } from './endCredits.js';
 import { createTitleScreen } from './titleScreen.js';
 import { createMixer } from './audio.js';
 import { createEffects } from './effects.js';
+import { createSfx } from './sfx.js';
 import { LAYERS, SHADOW_STAND_INS, useShadowCameraLayers } from './layers.js';
+import { addStoneDetail } from './detail.js';
 
 // --- Renderer: draws the 3D world onto the page ---
 // (Anti-aliasing is done by the effects in graphics.js, so it's off here.)
@@ -137,14 +139,17 @@ loader.setMeshoptDecoder(MeshoptDecoder);
 // If it has a simplified shadow copy (see layers.js), that comes along inside it: the full
 // model is only drawn on screen, the copy only into the shadows. Copies (clone) carry both.
 // Its surfaces are made a little rougher and less metallic than they come, so stone and
-// armor read as worn and matte rather than wet and glossy.
+// armor read as worn and matte rather than wet and glossy. The stone ones also get fine
+// close-up detail (see detail.js).
+const STONE_MODELS = ['Arena_center', 'Arena_walkway', 'Arena_gate', 'Dungeon_wall', 'Dungeon_wall_low', 'Dungeon_Pillar', 'Dungeon_floor'];
 const MATTE = { roughness: 1.3, metalness: 0.65 }; // multipliers
 const matted = new Set();
-function matte(material) {
+function matte(material, stone) {
   if (matted.has(material) || !material.isMeshStandardMaterial) return;
   matted.add(material);
   material.roughness = Math.min(1, material.roughness * MATTE.roughness);
   material.metalness *= MATTE.metalness;
+  if (stone) addStoneDetail(material);
 }
 function loadModel(url) {
   const name = url.match(/([^/]+)\.glb$/)[1];
@@ -155,7 +160,7 @@ function loadModel(url) {
         obj.castShadow = true;
         obj.receiveShadow = true;
         obj.frustumCulled = !obj.isSkinnedMesh; // animated meshes can move outside their box
-        matte(obj.material);
+        matte(obj.material, STONE_MODELS.includes(name));
         if (shadow) obj.layers.set(LAYERS.detail);
       }
     });
@@ -285,10 +290,12 @@ Promise.all([
       playerBlade: createBlade(sword ?? knight, WEAPONS.knightSword),
       bossModel,
       boss,
+      bossBlade,
       level,
       hud,
       stamina,
       effects,
+      sfx: createSfx(mixer),
       // The boss has crumbled away: a moment of quiet, then the end credits.
       onBossGone: () => setTimeout(() => {
         player.setActive(false); // no control while the credits roll

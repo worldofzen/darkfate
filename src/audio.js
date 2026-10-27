@@ -1,7 +1,7 @@
 // All the game's sound goes through one mixer with three volume "channels":
 //   music     the two music tracks (see TRACKS)
 //   ambience  wind and other background sounds
-//   effects   thunder (and later, sword clashes, footsteps...)
+//   effects   thunder, and the combat sounds (see sfx.js)
 // Change the numbers in MIX to rebalance everything in one place.
 //
 // Music tracks are streamed (like a music player) rather than loaded whole, so big WAV

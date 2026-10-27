@@ -1,9 +1,9 @@
 // The player: movement, combat and the third-person camera.
 //
 //   WASD          walk (relative to where the camera looks)    Shift   run
-//   Left click    attack (click again during a swing to chain a second, harder hit)
+//   Left click    attack (click again during a swing to chain the next one: light, heavy, light...)
 //   Right click   hold to block with the shield (you can walk while blocking)
-//   Space         dodge: leap toward the direction you're pressing, or backstep if none
+//   Space         dodge: roll toward the direction you're pressing, or backstep if none
 //   Q / middle click   lock on to the boss (again to let go; with nothing to lock onto,
 //                      the camera swings behind you). While locked you face the boss and strafe.
 //   R             drink a Flask of Crimson Tears (heals; you can only shuffle slowly while drinking)
@@ -21,17 +21,37 @@ const BODY_RADIUS = 0.4; // how "wide" the knight is when bumping into walls
 export const PLAYER_BODY = { radius: 0.45, height: 1.85 }; // for sword hit detection
 const MAX_HEALTH = 300;
 
-// Attacks: each click plays the next swing in this list.
-const ATTACK_CHAIN = ['slash', 'slash_3'];
-const ATTACK_DAMAGE = [50, 65]; // damage of each hit in the chain (the finisher hits hardest)
+// Attacks: each click plays the next swing in this list. A swing only hurts during its
+// `hits` window (fractions of the swing, measured on the animations): the moment the blade
+// actually comes through, not while it's being raised or after it has passed.
+const ATTACK_CHAIN = [
+  { clip: 'slash', damage: 50, hits: [0.32, 0.55] },
+  { clip: 'slash_3', damage: 65, hits: [0.42, 0.62] }, // the finisher hits hardest
+];
 const ATTACK_TIME_SCALE = 1.3; // play the swings a little faster than the pack does
 const COMBO_OPENS = 0.35; // a click after 35% of the swing is remembered for the next one
 const RECOVERY = 0.75; // after 75% of the swing you can chain, dodge or walk away
 
-// Dodges.
-const LEAP = { clip: 'jump', timeScale: 1.35 }; // crouched leap behind the shield
+// Dodges. The animation pack has no roll, so the roll is made here: the knight crouches behind
+// his shield, curls up, and the whole body turns head over heels once while sliding forward.
+// (A Mixamo roll saved as mixamo/Knight/roll.fbx would be used instead, after
+// `npm.cmd run animations`.)
+const ROLL = {
+  clip: 'crouch_block_idle', // the pose he curls up from
+  duration: 0.72, // seconds
+  distance: 3.3, // meters covered
+  spin: [0.06, 0.68], // part of the roll spent turning over
+  pivot: 0.62, // height (m) of the middle of the curled-up body, which it turns around
+  tuck: 1.3, // radians the back and head curl forward at most
+  knees: 1.0, // radians the thighs come up toward the chest (the shins fold back half as much again)
+};
 const BACKSTEP = { clip: 'run_back', timeScale: 1.3 }; // quick hop backwards
-const INVULNERABLE_PART = 0.7; // can't be hurt during the first 70% of a dodge
+const INVULNERABLE_PART = 0.6; // can't be hurt during the first 60% of a dodge
+
+// An attack, dodge or drink pressed while you're still busy (mid-swing, mid-roll, staggering)
+// is remembered this long, and happens as soon as it can, like in Dark Souls: you don't have
+// to press it on exactly the right frame.
+const INPUT_BUFFER = 0.35; // seconds
 
 // Getting hit (or having your guard broken) makes you stagger.
 const STAGGER = { clip: 'impact', timeScale: 1.2 };
@@ -76,10 +96,10 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
   // While the title screen is up, the player can't control anything (see setActive).
   let active = true;
 
-  // Button presses wait here until the next frame handles them.
-  let attackPressed = false;
-  let dodgePressed = false;
-  let drinkPressed = false;
+  // Button presses wait here until they can be used (seconds left, see INPUT_BUFFER).
+  let attackPressed = 0;
+  let dodgePressed = 0;
+  let drinkPressed = 0;
   let lockPressed = false;
   let blockHeld = false;
   let recenterYaw = null; // when set, the camera swings round to this angle
@@ -104,10 +124,10 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     if (!active) return;
     if (e.code === 'Space') {
       e.preventDefault();
-      if (!e.repeat) dodgePressed = true;
+      if (!e.repeat) dodgePressed = INPUT_BUFFER;
     }
     if (e.code === 'KeyQ' && !e.repeat) lockPressed = true;
-    if (e.code === 'KeyR' && !e.repeat) drinkPressed = true;
+    if (e.code === 'KeyR' && !e.repeat) drinkPressed = INPUT_BUFFER;
     keys.add(e.code);
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
@@ -141,7 +161,7 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     if (!active) return;
     if (e.button === 0) {
       if (canCapture && !locked()) capture(); // this click just takes the mouse back
-      else attackPressed = true;
+      else attackPressed = INPUT_BUFFER;
     }
     if (e.button === 2) blockHeld = true;
     if (e.button === 1) {
@@ -177,8 +197,9 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
   // --- Moves ---
   // Each start* function returns false if the move couldn't happen (e.g. no stamina left).
   function startAttack(index) {
-    if (!animator.has(ATTACK_CHAIN[index]) || !stamina.spend(STAMINA.attack)) return false;
-    const swing = animator.perform(ATTACK_CHAIN[index], { timeScale: ATTACK_TIME_SCALE });
+    if (!animator.has(ATTACK_CHAIN[index].clip) || !stamina.spend(STAMINA.attack)) return false;
+    const swing = animator.perform(ATTACK_CHAIN[index].clip, { timeScale: ATTACK_TIME_SCALE });
+    attackPressed = 0;
     mode = 'attack';
     modeTime = 0;
     current = swing;
@@ -193,23 +214,82 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
   }
 
   function startDodge() {
-    const leaping = input.lengthSq() > 0;
-    const style = leaping ? LEAP : BACKSTEP;
-    if (!animator.has(style.clip) || !stamina.spend(leaping ? STAMINA.dodge : STAMINA.backstep)) return false;
-    const dodge = animator.perform(style.clip, { timeScale: style.timeScale });
+    const rolling = input.lengthSq() > 0;
+    if (!rolling) return startBackstep();
+    const realRoll = animator.has('roll');
+    if (!(realRoll || animator.has(ROLL.clip)) || !stamina.spend(STAMINA.dodge)) return false;
+    dodgePressed = 0;
+    faceAngle = Math.atan2(input.x, input.z);
+    knight.rotation.y = faceAngle; // rolls snap to the new direction
+    let duration = ROLL.duration;
+    if (realRoll) duration = animator.perform('roll').duration;
+    else animator.perform(ROLL.clip, { fade: 0.08 });
     mode = 'dodge';
     modeTime = 0;
-    if (leaping) {
-      faceAngle = Math.atan2(input.x, input.z);
-      knight.rotation.y = faceAngle; // dodges snap to the new direction
-    }
-    const facing = new THREE.Vector3(Math.sin(knight.rotation.y), 0, Math.cos(knight.rotation.y));
-    current = { ...dodge, direction: leaping ? facing : facing.negate() };
+    const direction = new THREE.Vector3(Math.sin(faceAngle), 0, Math.cos(faceAngle));
+    current = { duration, speed: ROLL.distance / duration, direction, roll: !realRoll };
     return true;
+  }
+
+  function startBackstep() {
+    if (!animator.has(BACKSTEP.clip) || !stamina.spend(STAMINA.backstep)) return false;
+    const dodge = animator.perform(BACKSTEP.clip, { timeScale: BACKSTEP.timeScale });
+    dodgePressed = 0;
+    mode = 'dodge';
+    modeTime = 0;
+    const back = new THREE.Vector3(-Math.sin(knight.rotation.y), 0, -Math.cos(knight.rotation.y));
+    current = { ...dodge, direction: back, roll: false };
+    return true;
+  }
+
+  // --- Turning head over heels (the made-up roll) ---
+  // Runs after each frame's animation: curls the back and head forward and pulls the knees to
+  // the chest, then turns the whole skeleton round the middle of the curled-up body, about the
+  // knight's sideways axis.
+  const pelvis = knight.getObjectByName('pelvis');
+  const TUCK_BONES = [['spine_01', 0.3], ['spine_02', 0.3], ['spine_03', 0.2], ['neck_01', 0.2]]
+    .map(([name, share]) => ({ bone: knight.getObjectByName(name), share }))
+    .filter((b) => b.bone);
+  // Turning a thigh the other way brings its knee forward; the shin then folds back under it.
+  const KNEE_BONES = [['thigh_l', 1], ['thigh_r', 1], ['calf_l', -0.5], ['calf_r', -0.5]]
+    .map(([name, share]) => ({ bone: knight.getObjectByName(name), share }))
+    .filter((b) => b.bone);
+  const sideways = new THREE.Vector3();
+  const pivot = new THREE.Vector3();
+  const turnBy = new THREE.Quaternion();
+  const parentTurn = new THREE.Quaternion();
+  const localTurn = new THREE.Quaternion();
+  const bonePosition = new THREE.Vector3();
+  const UP = new THREE.Vector3(0, 1, 0);
+
+  // Turn `bone` by `angle` about the world axis `sideways` (and round `around`, if given).
+  function turnBone(bone, angle, around) {
+    turnBy.setFromAxisAngle(sideways, angle);
+    bone.parent.getWorldQuaternion(parentTurn);
+    localTurn.copy(parentTurn).invert().multiply(turnBy).multiply(parentTurn);
+    bone.quaternion.premultiply(localTurn);
+    if (around) {
+      bone.getWorldPosition(bonePosition).sub(around).applyQuaternion(turnBy).add(around);
+      bone.position.copy(bone.parent.worldToLocal(bonePosition));
+    }
+  }
+
+  function poseRoll(progress) {
+    if (!pelvis) return;
+    knight.updateMatrixWorld(true);
+    sideways.crossVectors(UP, current.direction).normalize(); // turning about it tips the head forward
+    const curl = Math.sin(Math.PI * Math.min(1, progress / 0.9));
+    for (const { bone, share } of TUCK_BONES) turnBone(bone, ROLL.tuck * share * curl);
+    for (const { bone, share } of KNEE_BONES) turnBone(bone, ROLL.knees * share * curl);
+    const spin = THREE.MathUtils.smoothstep(progress, ROLL.spin[0], ROLL.spin[1]);
+    pivot.copy(knight.position);
+    pivot.y += ROLL.pivot + 0.12 * Math.sin(Math.PI * spin); // a little lift as it goes over
+    turnBone(pelvis, spin * Math.PI * 2, pivot);
   }
 
   // Always starts (an empty flask still gets raised), so it never returns false.
   function startDrink() {
+    drinkPressed = 0;
     const full = flasks > 0;
     if (full) flasks--;
     else onEmptyFlask();
@@ -323,9 +403,12 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
       modeTime += dt;
       const progress = modeTime / current.duration;
       if (progress < 0.25) turnTowards(faceAngle, dt); // small aim adjustment at the start
-      if (attackPressed && progress > COMBO_OPENS) comboQueued = true;
+      if (attackPressed && progress > COMBO_OPENS) {
+        comboQueued = true;
+        attackPressed = 0;
+      }
       if (progress >= RECOVERY) {
-        const chained = comboQueued && comboIndex < ATTACK_CHAIN.length - 1 && startAttack(comboIndex + 1);
+        const chained = comboQueued && startAttack((comboIndex + 1) % ATTACK_CHAIN.length); // keeps going round the chain
         if (!chained) {
           comboQueued = false;
           if (!(dodgePressed && startDodge()) && (input.lengthSq() > 0 || progress >= 1)) backToFree();
@@ -334,7 +417,10 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     } else if (mode === 'dodge') {
       modeTime += dt;
       const progress = modeTime / current.duration;
-      const ease = progress < 0.75 ? 1 : Math.max(0, (1 - progress) / 0.25); // slow down at the end
+      // Rolls are quickest while turning over and slow as he gets up; backsteps slow at the end.
+      const ease = current.roll
+        ? 1.25 * (progress < 0.68 ? 1 : Math.max(0, (1 - progress) / 0.32))
+        : progress < 0.75 ? 1 : Math.max(0, (1 - progress) / 0.25);
       knight.position.addScaledVector(current.direction, current.speed * ease * dt);
       pushOut(knight.position, BODY_RADIUS);
       if (progress >= 1) backToFree();
@@ -393,11 +479,12 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
         }
       }
     }
-    attackPressed = false;
-    dodgePressed = false;
-    drinkPressed = false;
+    attackPressed = Math.max(0, attackPressed - dt);
+    dodgePressed = Math.max(0, dodgePressed - dt);
+    drinkPressed = Math.max(0, drinkPressed - dt);
     stamina.update(dt, { blocking: mode === 'free' && blockHeld });
     animator.update(dt);
+    if (mode === 'dodge' && current.roll) poseRoll(Math.min(1, modeTime / current.duration));
 
     // The flask is in hand only while drinking, and glows brightest at the sip.
     if (flask) {
@@ -475,9 +562,13 @@ export function createPlayer(knight, animator, camera, canvas, stamina, lockOn, 
     get healthFraction() {
       return health / MAX_HEALTH;
     },
-    // The swing in progress (null if not attacking): its number and how much damage it does.
+    // The swing in progress (null if not attacking): its number, how much damage it does, and
+    // whether the blade is coming through right now (`cutting`).
     get swing() {
-      return mode === 'attack' ? { id: swingCount, damage: ATTACK_DAMAGE[comboIndex] } : null;
+      if (mode !== 'attack') return null;
+      const { damage, hits } = ATTACK_CHAIN[comboIndex];
+      const progress = modeTime / current.duration;
+      return { id: swingCount, damage, cutting: progress >= hits[0] && progress <= hits[1] };
     },
     get blocking() {
       return mode === 'free' && blockHeld;

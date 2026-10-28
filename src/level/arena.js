@@ -61,6 +61,9 @@ function buildPlatform(level, loadModel) {
     const scale = ARENA.platform / PLATFORM_MODEL.edge;
     platform.scale.setScalar(scale);
     platform.position.set(0, -PLATFORM_MODEL.floorY * scale + 0.12, CZ); // a little raised: level with the bridge at the edge
+    // The floor you fight on, seen up close all the time: its original 8192-pixel textures
+    // replace the model's 4096-pixel ones once the game has loaded (see main.js).
+    platform.userData.hiRes = { map: 'textures/arena_floor_color_8k.webp', normalMap: 'textures/arena_floor_normal_8k.webp' };
     level.add(platform);
     platform.updateMatrixWorld(true);
     return platform;

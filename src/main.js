@@ -357,12 +357,58 @@ Promise.all([
     // than competing with them while the game loads.
     mixer.preloadAll();
     credits.preload();
+    streamHiResTextures();
     window.gameReady = true; // (index.html stops reporting start-up problems)
   })
   .catch((err) => {
     console.error(err);
     document.querySelector('.title-start').textContent = 'Could not load the game';
   });
+
+// --- Full-resolution textures, streamed in after loading ---
+// A model tagged with `userData.hiRes` (see arena.js) starts with its lighter textures; once the
+// game is ready, the originals download in the background and take their place. Only on
+// computers whose graphics card can hold textures that big; phones keep the lighter ones.
+// The pictures are unpacked off the main thread (ImageBitmapLoader), but sending one to the
+// graphics card still takes a moment, so that waits until you're not in the middle of a fight.
+const HI_RES_SIZE = 8192;
+const waitingTextures = []; // downloaded, waiting for a calm moment to go to the graphics card
+function streamHiResTextures() {
+  if (MOBILE || renderer.capabilities.maxTextureSize < HI_RES_SIZE) return;
+  const loader = new THREE.ImageBitmapLoader();
+  loader.setOptions({ imageOrientation: 'none', premultiplyAlpha: 'none' }); // as glTF textures are
+  scene.traverse((model) => {
+    const hiRes = model.userData.hiRes;
+    if (!hiRes) return;
+    for (const [slot, url] of Object.entries(hiRes)) {
+      const materials = new Set();
+      model.traverse((o) => {
+        if (o.isMesh && o.layers.test(camera.layers) && o.material[slot]) materials.add(o.material);
+      });
+      loader.load(url, (bitmap) => waitingTextures.push({ bitmap, slot, materials }));
+    }
+  });
+}
+function applyHiResTextures() {
+  if (!waitingTextures.length || fight?.state === 'fighting') return;
+  for (const { bitmap, slot, materials } of waitingTextures.splice(0)) {
+    if (!materials.size) continue;
+    const old = [...materials][0][slot];
+    const texture = new THREE.Texture(bitmap);
+    texture.flipY = false;
+    texture.colorSpace = old.colorSpace;
+    texture.wrapS = old.wrapS;
+    texture.wrapT = old.wrapT;
+    texture.channel = old.channel;
+    texture.anisotropy = 16;
+    texture.needsUpdate = true;
+    renderer.initTexture(texture);
+    for (const material of materials) {
+      material[slot].dispose(); // free the lighter one's memory on the graphics card
+      material[slot] = texture;
+    }
+  }
+}
 
 // --- Keep the picture correct when the window is resized ---
 window.addEventListener('resize', () => {
@@ -385,6 +431,7 @@ function step(realDt) {
   mist.userData.update(time, camera);
   towerMist?.userData.update(time, camera);
   storm.update(time);
+  applyHiResTextures();
   // The "click for sound" hint goes away once the browser lets sound play.
   if (mixer.unlocked) document.querySelector('.title-sound')?.remove();
   if (!player) return;

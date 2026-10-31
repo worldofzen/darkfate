@@ -25,6 +25,7 @@ const HIDE_BOSS_BAR_AFTER_WIN = 5;
 
 const DISINTEGRATE_AFTER = 2.3; // seconds after the killing blow: the boss has fallen by then
 const BOSS_WHOOSH_SPEED = 9; // m/s: the boss's blade makes its whoosh as it passes this speed
+const BOSS_WHOOSH_GAP = 0.8; // seconds: its speed wobbles around that mark mid-swing, so one swing = one whoosh
 
 // `sfx` plays the combat sounds (see sfx.js).
 export function createFight({ knight, player, playerBlade, bossModel, boss, bossBlade, level, hud, stamina, effects, sfx, onBossGone }) {
@@ -73,6 +74,7 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
   let lastSwingHeard = -1;
   let lastMode = player.mode;
   let bossBladeFast = false;
+  let sinceBossWhoosh = Infinity;
   let bossPhase = 1;
 
   function bossInReach() {
@@ -131,7 +133,11 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
     if (player.mode === 'dodge' && lastMode !== 'dodge') sfx.roll();
     lastMode = player.mode;
     const bossFast = boss.state === 'attack' && bossBlade.speed > BOSS_WHOOSH_SPEED;
-    if (bossFast && !bossBladeFast) sfx.heavySwing();
+    sinceBossWhoosh += dt;
+    if (bossFast && !bossBladeFast && sinceBossWhoosh > BOSS_WHOOSH_GAP) {
+      sfx.heavySwing();
+      sinceBossWhoosh = 0;
+    }
     bossBladeFast = bossFast;
 
     // Your sword hitting the boss (each swing can only hit once).
@@ -148,7 +154,7 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
       const cut = at.clone().addScaledVector(apart.setY(0).normalize(), -BOSS.body.radius * 0.7);
       if (boss.state === 'rage') {
         // It can't be hurt while it enrages: your blade glances off.
-        sfx.block();
+        sfx.glance();
         effects.sparks(cut, knight.position, 30);
         player.shake(0.1);
       } else {
@@ -160,6 +166,7 @@ export function createFight({ knight, player, playerBlade, bossModel, boss, boss
         if (boss.takeDamage(swing.damage, knight.position)) {
           state = 'won';
           timer = 0;
+          sfx.bossDeath();
           hud.showBanner('ENEMY FELLED', 'felled', 4);
           level.removeFogGate();
         }

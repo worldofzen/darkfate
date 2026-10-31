@@ -189,6 +189,7 @@ export function createBrazier(glowTexture, { model, height = 1.6, light = true }
     fireLight = new THREE.PointLight(0xff8a3d, 30, 18, 2);
     fireLight.position.y = fireY + bowl * 3.5; // above the flames, so it doesn't blind the rim
     group.add(fireLight);
+    group.userData.fireLight = fireLight; // (its shadows come from fireShadow.js)
   }
 
   // Uneven flicker: several unrelated wobbles added up, with the odd sudden dip.

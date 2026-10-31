@@ -1,7 +1,7 @@
 // All the game's sound goes through one mixer with three volume "channels":
 //   music     the music tracks (see TRACKS)
 //   ambience  wind and other background sounds
-//   effects   thunder, and the combat sounds (see sfx.js)
+//   effects   thunder (see level/weather.js), and the combat sounds (see sfx.js)
 // Change the numbers in MIX to rebalance everything in one place.
 //
 // Music tracks are streamed (like a music player) rather than loaded whole, so big WAV
@@ -37,7 +37,15 @@ export function createMixer() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const master = ctx.createGain();
   master.gain.value = MIX.master;
-  master.connect(ctx.destination);
+  // A limiter at the very end: when a thunderclap, a big hit and a loud bar of music land
+  // together, it holds them down instead of letting them crackle. Quieter moments pass untouched.
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -6;
+  limiter.knee.value = 3;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.002;
+  limiter.release.value = 0.2;
+  master.connect(limiter).connect(ctx.destination);
   const channel = (volume) => {
     const g = ctx.createGain();
     g.gain.value = volume;

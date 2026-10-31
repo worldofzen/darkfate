@@ -1,19 +1,34 @@
-// Combat sounds, made in code (no sound files): sword swings, cuts landing, the shield taking
-// a blow, a guard breaking, and the knight rolling. They play on the mixer's effects channel
-// (see audio.js).
+// Combat sounds: sword swings, cuts landing, the shield taking a blow, a guard breaking, the
+// knight rolling and the boss dying. They play on the mixer's effects channel (see audio.js).
 //
-// Each sound is built from two simple ingredients:
+// Some are recorded sounds from public/sfx/ (see FILES); until those have downloaded, the
+// made-in-code version plays instead. The made-in-code ones are built from two ingredients:
 //   noise    a hiss, shaped by filters into a whoosh (swing), a crunch (a cut) or a scuff (roll)
 //   tones    pure notes; a low falling one is a thud, a handful of high ringing ones a metal clang
 
+// The balance: each sound's volume is set so it lands at a chosen loudness (measured over its
+// loudest 0.3 s), from loudest to quietest:
+//   boss dies -13 dB · hit lands / you get hurt -14.5 · boss swings, guard breaks -16
+//   shield blocks -17 · your sword swings -19 · roll -22 · (thunder, in weather.js: about -21)
+// The music sits around -23 under all of it. To make one louder, raise its number here.
 const SFX = {
   swing: 0.35,
   heavySwing: 0.5, // the boss's great sword
   cut: 0.8,
-  hurt: 0.75,
+  hurt: 1.05,
   block: 0.45,
-  guardBreak: 0.6,
-  roll: 0.4,
+  guardBreak: 0.8,
+  roll: 0.62,
+};
+
+// The recorded sounds in public/sfx/, and how loud each plays. Each also plays a touch higher
+// or lower every time, so repeats don't sound identical (`vary`: 0.05 = up to 5% either way).
+const FILES = {
+  swing: { file: 'knight_sword_swing.wav', volume: 0.58, vary: 0.06 }, // the knight's sword
+  heavySwing: { file: 'boss_sword_swing.wav', volume: 0.88, vary: 0.04 }, // the boss's great sword
+  cut: { file: 'boss_hit.wav', volume: 0.87, vary: 0.05 }, // your blade landing on the boss
+  block: { file: 'knight_shield_hit.wav', volume: 1, vary: 0.05 }, // a blow caught on your shield
+  bossDeath: { file: 'boss_death.wav', volume: 1.7, vary: 0 },
 };
 
 export function createSfx(mixer) {
@@ -72,17 +87,51 @@ export function createSfx(mixer) {
 
   const now = () => ctx.currentTime;
 
+  // Download and decode the recorded sounds in the background.
+  const buffers = {};
+  for (const [name, { file }] of Object.entries(FILES)) {
+    fetch(`sfx/${file}`)
+      .then((response) => response.arrayBuffer())
+      .then((data) => ctx.decodeAudioData(data))
+      .then((buffer) => (buffers[name] = buffer))
+      .catch(() => {}); // stays on the made-in-code version
+  }
+
+  // Play the recording called `name` (`louder` scales its FILES volume); false if it isn't ready yet.
+  function sample(name, louder = 1) {
+    const buffer = buffers[name];
+    if (!buffer) return false;
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.playbackRate.value = 1 + (Math.random() * 2 - 1) * FILES[name].vary;
+    const gain = ctx.createGain();
+    gain.gain.value = FILES[name].volume * louder;
+    source.connect(gain).connect(out);
+    source.start();
+    return true;
+  }
+
+  // A metal clang off a shield or armour (made in code).
+  function glance() {
+    const t = now();
+    clang(t, SFX.block, 420 + Math.random() * 40);
+    tone(t, { peak: SFX.block * 0.6, decay: 0.15, from: 160, to: 70 });
+  }
+
   return {
     // The knight's sword cutting the air (`heavy` for the finisher).
     swing(heavy = false) {
+      if (sample('swing', heavy ? 1.2 : 1)) return;
       hiss(now(), { peak: SFX.swing * (heavy ? 1.2 : 1), attack: 0.07, decay: 0.22, from: 500, to: heavy ? 1600 : 2200, end: 500, q: 1.4 });
     },
     // The boss's great sword: deeper and longer.
     heavySwing() {
+      if (sample('heavySwing')) return;
       hiss(now(), { peak: SFX.heavySwing, attack: 0.12, decay: 0.35, from: 250, to: 900, end: 200, q: 1.1 });
     },
     // Your blade biting into the boss: a heavy thud with a crunch on top.
     cut(heavy = false) {
+      if (sample('cut', heavy ? 1.15 : 1)) return;
       const t = now();
       const k = heavy ? 1.15 : 1;
       tone(t, { peak: SFX.cut * k, decay: 0.22, from: 140, to: 45 });
@@ -98,9 +147,14 @@ export function createSfx(mixer) {
     },
     // A blow caught on the shield.
     block() {
-      const t = now();
-      clang(t, SFX.block, 420 + Math.random() * 40);
-      tone(t, { peak: SFX.block * 0.6, decay: 0.15, from: 160, to: 70 });
+      if (sample('block')) return;
+      glance();
+    },
+    // Your blade glancing off the boss while it enrages and can't be hurt.
+    glance,
+    // The boss's death cry.
+    bossDeath() {
+      sample('bossDeath');
     },
     // Not enough stamina to hold the shield: a harsher clang and a lurch.
     guardBreak() {

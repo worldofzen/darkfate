@@ -1,6 +1,6 @@
 // High-quality rendering: everything drawn on top of the basic 3D picture.
 //
-//   1. Environment light: soft reflections on armor and stone (from a built-in "photo studio" scene).
+//   1. Environment light: soft reflections on armor and stone, of the storm sky (made in weather.js).
 //   2. Ambient occlusion (GTAO): soft contact shadows where things meet — wall bases, slab gaps, folds.
 //   3. Bloom: bright things (fire, the Site of Grace, the flask) glow into their surroundings.
 //   4. Lens: shafts of moonlight streaming out from the moon through the clouds, and thin
@@ -8,13 +8,13 @@
 //      half resolution, they're soft anyway.
 //   5. Tone mapping and colour: film-like contrast, slightly desaturated, a little sharpening,
 //      colour fringes toward the edges of the picture, vignette and fine grain.
-// The picture is drawn with 4x anti-aliasing for smooth edges.
+// The picture is drawn with 4x anti-aliasing for smooth edges, and on computers at 1.5x the
+// screen's resolution, then scaled down (LOOK.supersample), so fine detail doesn't shimmer.
 //
 // Phones and tablets (MOBILE) get a lighter version: no ambient occlusion and no 4x anti-aliasing.
 // Their graphics chips are slower, and their less precise depth buffers make the ambient
 // occlusion smear dark patches along the triangles of walls and floors. They skip the lens too.
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
@@ -28,7 +28,11 @@ export const MOBILE =
   window.matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 
 export const LOOK = {
-  environment: 0.17, // strength of the soft reflections
+  // Computers draw the picture at this many times the screen's resolution and scale it down,
+  // which smooths the shimmer on stone, grass, blades and armour edges (main.js steps it back
+  // down if the graphics card can't keep up). Phones don't.
+  supersample: MOBILE ? 1 : 1.5,
+  environment: 3, // strength of the reflections and fill light from the storm sky
   exposure: 1.05,
   bloom: { strength: 0.55, radius: 0.6, threshold: 0.85 },
   ambientOcclusion: { radius: 0.5, intensity: 0.9 },
@@ -194,7 +198,11 @@ class LensPass extends Pass {
 }
 
 function addAmbientOcclusion(composer, scene, camera, size) {
-  const ao = new GTAOPass(scene, camera, size.x, size.y);
+  // Worked out at the screen's own resolution, not the supersampled one (see LOOK.supersample):
+  // it's soft shading anyway, and by far the costliest effect here.
+  const ao = new GTAOPass(scene, camera, Math.round(size.x / LOOK.supersample), Math.round(size.y / LOOK.supersample));
+  const setSize = ao.setSize.bind(ao);
+  ao.setSize = (width, height) => setSize(Math.round(width / LOOK.supersample), Math.round(height / LOOK.supersample));
   ao.blendIntensity = LOOK.ambientOcclusion.intensity;
   ao.updateGtaoMaterial({ radius: LOOK.ambientOcclusion.radius, distanceExponent: 1, thickness: 1, scale: 1 });
   // Glows, sparks, fog and other see-through things must not cast ambient-occlusion shadows
@@ -217,9 +225,7 @@ export function createGraphics(renderer, scene, camera, { moonDirection }) {
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = LOOK.exposure;
 
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environmentIntensity = LOOK.environment;
+  scene.environmentIntensity = LOOK.environment; // (the environment itself comes from the storm)
 
   const size = renderer.getDrawingBufferSize(new THREE.Vector2());
   const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: MOBILE ? 0 : 4 });

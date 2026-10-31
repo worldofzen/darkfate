@@ -18,7 +18,7 @@ export const STORM = {
   strikeEvery: [4, 9], // seconds between lightning strikes (random in this range)
   flickerEvery: [0.8, 3], // seconds between silent flickers deep in the clouds
   distance: [140, 280], // how far away strikes are (m); thunder arrives later from further away
-  thunderVolume: 0.55,
+  thunderVolume: 0.8, // a close clap peaks a little under the combat sounds (see sfx.js)
   windVolume: 0.05,
   wind: [0.0035, 0.0012], // how fast the cloud drifts (noise tiles per second)
   panorama: MOBILE ? [1024, 256] : [2048, 512], // size of the worked-out sky (texels)
@@ -249,11 +249,27 @@ const skyFragment = /* glsl */ `
       c = mix(nearRock, c, smoothstep(nearRidge - 0.003, nearRidge, d.y) * 0.5);
       c = mix(c, horizon * 1.4, (1.0 - smoothstep(-0.02, 0.03, d.y)) * 0.6); // valley mist
     }
+  #ifdef REFLECTION
+    // (The copy that lights the scene: below the horizon is the dark arena and its ruins.)
+    c *= mix(0.15, 1.0, smoothstep(-0.3, 0.02, d.y));
+  #endif
     gl_FragColor = vec4(c, 1.0);
   }
 `;
 
-// --- Thunder and wind, made with the Web Audio API (no sound files) ---
+const REFLECTION_SIZE = 128; // texels per side of the sky cube the reflections come from
+const REFLECT_EVERY = 0.5; // seconds between redoing the reflections while the sky is calm
+
+// --- Thunder and wind ---
+// Wind is made in code. Thunder is two recordings from public/sfx/ blended together (until they
+// have downloaded, a made-in-code rumble plays instead). `volume`: each brought to the same
+// loudness, so STORM.thunderVolume sets how loud thunder sits against the fight.
+const THUNDER = {
+  crack: { file: 'thunder2.mp3', volume: 0.5 }, // a sharp, close clap that dies away fast
+  rumble: { file: 'thunder1.mp3', volume: 0.7 }, // a slow roll that builds and lingers
+};
+
+// (The made-in-code version's noise, also the wind's.)
 function noiseBuffer(ctx, seconds) {
   const buffer = ctx.createBuffer(1, ctx.sampleRate * seconds, ctx.sampleRate);
   const data = buffer.getChannelData(0);
@@ -289,9 +305,46 @@ function createSound(mixer) {
   wind.start();
   lfo.start();
 
+  // The recorded thunder (see THUNDER), downloading in the background.
+  const recorded = {};
+  for (const [part, { file }] of Object.entries(THUNDER)) {
+    fetch(`sfx/${file}`)
+      .then((response) => response.arrayBuffer())
+      .then((data) => ctx.decodeAudioData(data))
+      .then((buffer) => (recorded[part] = buffer))
+      .catch(() => {}); // stays on the made-in-code thunder
+  }
+
+  // One part of a recorded clap, `delay` seconds from now.
+  function playPart(part, volume, delay, rate, pan, brightness) {
+    const source = ctx.createBufferSource();
+    source.buffer = recorded[part];
+    source.playbackRate.value = rate;
+    const filter = ctx.createBiquadFilter(); // distance dulls thunder: the far ones lose their top
+    filter.type = 'lowpass';
+    filter.frequency.value = brightness;
+    const gain = ctx.createGain();
+    gain.gain.value = volume;
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = pan;
+    source.connect(filter).connect(gain).connect(panner).connect(mixer.effects);
+    source.start(ctx.currentTime + delay);
+  }
+
   return {
-    // A close strike cracks sharply; a far one is a low, long rumble.
+    // A close strike cracks sharply over the rumble; a far one is mostly a low, dull rumble.
+    // The two recordings blend: the crack fades out with distance, the rumble always rolls in
+    // just behind it. Pitch, timing and side change every time, so no two claps match.
     thunder(closeness) {
+      if (recorded.crack && recorded.rumble) {
+        const rate = 0.88 + Math.random() * 0.17;
+        const pan = (Math.random() - 0.5) * 0.8;
+        const brightness = 700 + 9000 * closeness ** 2;
+        const loudness = STORM.thunderVolume * (0.35 + 0.65 * closeness);
+        playPart('crack', THUNDER.crack.volume * loudness * closeness ** 1.5, 0, rate, pan, brightness);
+        playPart('rumble', THUNDER.rumble.volume * loudness, 0.1 + (1 - closeness) * 0.3, rate * 0.95, -pan * 0.5, brightness);
+        return;
+      }
       const now = ctx.currentTime;
       const source = ctx.createBufferSource();
       source.buffer = rumble;
@@ -383,6 +436,29 @@ export function createStorm(scene, { horizonColor, moonDirection, renderer }) {
     sky.updateMatrixWorld();
   };
   scene.add(sky);
+
+  // Reflections: armour, blades and stone reflect this storm sky, and take their soft fill light
+  // from it: brighter from above and round the moon, dark from the ground, a cold flare when
+  // lightning strikes. A small copy of the sky (`reflectionSky`) is photographed all the way
+  // round into a cube, then blurred into the form three.js lights with (a PMREM). Redone every
+  // REFLECT_EVERY seconds as the clouds drift, and every frame while lightning lights them.
+  const reflectionSky = new THREE.Scene();
+  reflectionSky.add(new THREE.Mesh(
+    new THREE.SphereGeometry(10, 32, 16),
+    new THREE.ShaderMaterial({ uniforms, vertexShader: skyVertex, fragmentShader: skyFragment, defines: { REFLECTION: '' }, side: THREE.BackSide, depthWrite: false })
+  ));
+  const cube = new THREE.WebGLCubeRenderTarget(REFLECTION_SIZE, { type: THREE.HalfFloatType });
+  const cubeCamera = new THREE.CubeCamera(1, 20, cube);
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  let reflection = null;
+  let reflectedAt = -Infinity;
+  function reflect(time) {
+    cubeCamera.update(renderer, reflectionSky);
+    reflection = pmrem.fromCubemap(cube.texture, reflection);
+    scene.environment = reflection.texture;
+    reflectedAt = time;
+  }
+  reflect(-Infinity); // straight away, so the shaders built while loading already include it
 
   // The flash itself: a cold light from the sky, and a jagged bolt in the distance. The bolt
   // is made of thin glowing rods (white-hot, so the bloom haloes them), brightest where it
@@ -507,6 +583,7 @@ export function createStorm(scene, { horizonColor, moonDirection, renderer }) {
       }
       uniforms.glow.value = glow;
       uniforms.flash.value = flash;
+      if (flash > 0 || glow > 0 || time - reflectedAt > REFLECT_EVERY) reflect(time);
       light.intensity = flash * 8;
       bolt.material.opacity = flash > 0.3 ? Math.min(1, flash * 1.5) : 0;
     },

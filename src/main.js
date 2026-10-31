@@ -8,6 +8,7 @@ import { makeGlowTexture } from './level/textures.js';
 import { SPAWN, ARENA } from './level/layout.js';
 import { createPlayer } from './player.js';
 import { FIRE_SHADOW_LAYER } from './level/siteOfGrace.js';
+import { createFireShadow } from './level/fireShadow.js';
 import { createAnimator } from './animator.js';
 import { equipWeapon, equipShield, holdInLeftHand, WEAPONS } from './equipment.js';
 import { createStamina } from './stamina.js';
@@ -17,7 +18,7 @@ import { createBoss, BOSS } from './boss.js';
 import { createFight } from './fight.js';
 import { createLockOn } from './lockOn.js';
 import { createFlask } from './flask.js';
-import { createGraphics, MOBILE } from './graphics.js';
+import { createGraphics, MOBILE, LOOK } from './graphics.js';
 import { createDust } from './level/atmosphere.js';
 import { createStorm } from './level/weather.js';
 import { createMist } from './level/mist.js';
@@ -43,7 +44,10 @@ if (!document.createElement('canvas').getContext('webgl2')) {
   throw new Error('WebGL 2 is not available');
 }
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-const MAX_PIXEL_RATIO = Math.min(window.devicePixelRatio, MOBILE ? 1.5 : 2); // phones: fewer pixels to fill
+// Computers draw extra pixels and scale the picture down (LOOK.supersample, in graphics.js);
+// if that's too much for the graphics card, `keepSmooth` (below) steps it back down.
+// Phones: fewer pixels to fill.
+const MAX_PIXEL_RATIO = MOBILE ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio * LOOK.supersample, 2);
 renderer.setPixelRatio(MAX_PIXEL_RATIO);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
@@ -198,6 +202,9 @@ stamina.onEmpty(() => hud.stamina.flash()); // bar flashes when you try somethin
 
 // --- The level: spawn courtyard, corridor, fog gate, boss arena ---
 const level = buildLevel(scene, loadModel);
+// The knight and the boss throw shadows from the nearest brazier (see fireShadow.js).
+const fireShadow = createFireShadow(scene);
+fireShadow.findFires(scene); // (the arena's join them once loaded, below)
 
 // The tower: the landmark behind the boss, so it must read through the gloom. The night fog
 // would swallow it at this distance, so it gets a much thinner fog of its own, a faint cold
@@ -278,7 +285,7 @@ Promise.all([
     // Equip before animations start (it measures the hands in their resting pose).
     if (sword) equipWeapon(knight, sword, WEAPONS.knightSword);
     if (shield) equipShield(knight, shield);
-    knight.traverse((o) => o.isMesh && o.layers.enable(FIRE_SHADOW_LAYER)); // the bonfire throws his shadow
+    knight.traverse((o) => o.isMesh && o.layers.enable(FIRE_SHADOW_LAYER)); // the bonfire and the braziers throw his shadow
     const flask = createFlask();
     holdInLeftHand(knight, flask);
     const lockOn = createLockOn(scene, knight);
@@ -289,6 +296,7 @@ Promise.all([
 
     // The boss stands toward the back of the arena, facing the fog gate.
     bossModel.scale.setScalar(BOSS.scale);
+    bossModel.traverse((o) => o.isMesh && o.layers.enable(FIRE_SHADOW_LAYER)); // the braziers throw its shadow too
     place(bossModel, 0, ARENA.z - 6, 0);
     bossFigure = bossModel;
     if (bossSword) equipWeapon(bossModel, bossSword, WEAPONS.bossSword);
@@ -326,6 +334,7 @@ Promise.all([
     // is built into every shader: a lamp turning up later would mean building them all again.
     await Promise.allSettled(loading);
     await new Promise((resolve) => setTimeout(resolve)); // (and their own set-up has run)
+    fireShadow.findFires(scene); // the arena's braziers are in place now too
     scene.traverse((o) => {
       for (const material of [o.material ?? []].flat()) {
         for (const value of Object.values(material)) if (value?.isTexture) renderer.initTexture(value);
@@ -439,6 +448,7 @@ function step(realDt) {
   fight.update(dt);
   followGround(knight, dt);
   followGround(bossFigure, dt);
+  fireShadow.update(knight.position);
   updateMusic();
   hud.stamina.update(stamina.fraction, dt);
   hud.setFlasks(player.flasks);

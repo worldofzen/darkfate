@@ -10,5 +10,6 @@ music_source/
 *.blend
 *.blend1
 *.wav
+!public/sfx/*.wav
 *.crdownload
 .claude/

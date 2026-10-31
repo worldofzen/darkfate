@@ -230,7 +230,15 @@ export function createFogGate({ halfWidth, spring }, glow) {
     });
     moteGeometry.attributes.position.needsUpdate = true;
     moteMaterial.opacity = (0.6 + 0.4 * Math.sin(time * 1.3)) * fade;
-    light.intensity = (5.5 + Math.sin(time * 0.8) * 0.8 + Math.sin(time * 2.3) * 0.3) * (0.4 + 0.6 * fade);
+    light.intensity = present ? (5.5 + Math.sin(time * 0.8) * 0.8 + Math.sin(time * 2.3) * 0.3) * (0.4 + 0.6 * fade) : 0;
+  };
+  // Clear the gate away (false) or bring it back. Everything but the light is hidden; the light
+  // only goes dark, because a light leaving the scene makes every shader be rebuilt: a freeze
+  // of several seconds.
+  let present = true;
+  group.userData.setPresent = (on) => {
+    present = on;
+    for (const child of group.children) if (child !== light) child.visible = on;
   };
   return group;
 }

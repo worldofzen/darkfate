@@ -526,5 +526,5 @@ renderer.setAnimationLoop(() => {
   const realDt = clock.getDelta();
   keepSmooth(realDt);
   step(Math.min(realDt, 0.1)); // capped, so a lag spike can't fling you through a wall
-  graphics.render(time);
+  if (!credits.covering) graphics.render(time); // (nothing to draw while the end credits hide it all)
 });

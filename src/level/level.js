@@ -52,12 +52,12 @@ export function buildLevel(scene, loadModel) {
     // After the boss dies, the fog disappears for good.
     removeFogGate() {
       gate.blocker.enabled = false;
-      gate.fog.visible = false;
+      gate.fog.userData.setPresent(false);
     },
     // Put the fog back (when you die and the fight resets).
     restoreFogGate() {
       gate.blocker.enabled = false;
-      gate.fog.visible = true;
+      gate.fog.userData.setPresent(true);
     },
   };
 }

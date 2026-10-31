@@ -54,6 +54,7 @@ export function createEndCredits(mixer, onClose) {
   mixer.addVideo(video); // the video's sound goes through the mixer, balanced with the music
 
   let state = 'off'; // 'off', 'video', 'end'
+  let coveredAt = 0; // when the screen has finished fading to black (performance.now() time)
 
   function finishVideo() {
     if (state !== 'video') return;
@@ -89,6 +90,7 @@ export function createEndCredits(mixer, onClose) {
     play() {
       if (state !== 'off') return;
       state = 'video';
+      coveredAt = performance.now() + 2300; // (the fade in .credits takes 2.2 s)
       document.exitPointerLock?.();
       document.body.classList.add('on-credits');
       screen.classList.add('showing');
@@ -103,6 +105,11 @@ export function createEndCredits(mixer, onClose) {
     },
     get active() {
       return state !== 'off';
+    },
+    // True while the credits hide the game completely (so it needn't be drawn, leaving the
+    // graphics card to the video).
+    get covering() {
+      return state !== 'off' && performance.now() > coveredAt;
     },
   };
 }
